@@ -38,14 +38,14 @@ type Syncer struct {
 }
 
 func New(cfg *config.Config, db *sqlx.DB) *Syncer {
-	remotes := make(map[string]*jellyfin.Client, len(cfg.Remotes))
-	for _, r := range cfg.Remotes {
-		remotes[r.ID] = jellyfin.NewClient(r.APIURL, r.APIKey)
+	remotes := make(map[string]*jellyfin.Client, len(cfg.GetRemotes()))
+	for _, r := range cfg.GetRemotes() {
+		remotes[r.GetID()] = jellyfin.NewClient(r.GetAPIURL(), r.GetAPIKey())
 	}
 	return &Syncer{
 		cfg:     cfg,
 		db:      db,
-		target:  jellyfin.NewClient(cfg.Target.URL, cfg.Target.APIKey),
+		target:  jellyfin.NewClient(cfg.GetTarget().GetURL(), cfg.GetTarget().GetAPIKey()),
 		remotes: remotes,
 	}
 }
@@ -143,7 +143,7 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 
 		localPath := s.findExistingLocalPath(key.ProviderKey, winner.Item.ProviderIDs, syncedItems, syncedMap)
 		if localPath == "" {
-			localPath = winner.LibraryMapping.LocalPath
+			localPath = winner.LibraryMapping.GetLocalPath()
 		}
 
 		strmPath, err := strm.BuildPath(winner.Item, localPath, winner.Remote, resolutionSuffix)
@@ -159,15 +159,15 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 
 		existing, inDB := syncedMap[key]
 		switch {
-		case inDB && existing.RemoteID == winner.Remote.ID:
+		case inDB && existing.RemoteID == winner.Remote.GetID():
 			// no-op
-		case inDB && existing.RemoteID != winner.Remote.ID:
+		case inDB && existing.RemoteID != winner.Remote.GetID():
 			if err := strm.Write(strmPath, strmContent); err != nil {
 				slog.Warn("writing strm", "path", strmPath, "err", err)
 				continue
 			}
 			updated := existing
-			updated.RemoteID = winner.Remote.ID
+			updated.RemoteID = winner.Remote.GetID()
 			updated.StrmPath = strmPath
 			updated.Encoding = winner.Item.Encoding
 			if err := db.UpdateSyncedItem(s.db, updated); err != nil {
@@ -181,7 +181,7 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 			}
 			if err := db.InsertSyncedItem(s.db, db.SyncedItem{
 				ID:             uuid.New().String(),
-				RemoteID:       winner.Remote.ID,
+				RemoteID:       winner.Remote.GetID(),
 				JellyfinItemID: winner.Item.JellyfinID,
 				ProviderIDs:    marshalProviderIDs(winner.Item.ProviderIDs),
 				Resolution:     key.Resolution,
@@ -254,11 +254,11 @@ func (s *Syncer) buildTargetMaps(ctx context.Context) (map[candidateKey]struct{}
 func (s *Syncer) buildCandidateMap(ctx context.Context) (map[candidateKey][]candidate, error) {
 	candidateMap := make(map[candidateKey][]candidate)
 
-	for remoteIdx, remote := range s.cfg.Remotes {
-		client := s.remotes[remote.ID]
+	for remoteIdx, remote := range s.cfg.GetRemotes() {
+		client := s.remotes[remote.GetID()]
 		libs, err := client.GetLibraries(ctx)
 		if err != nil {
-			slog.Warn("getting libraries for remote", "remote_id", remote.ID, "err", err)
+			slog.Warn("getting libraries for remote", "remote_id", remote.GetID(), "err", err)
 			continue
 		}
 
@@ -267,17 +267,17 @@ func (s *Syncer) buildCandidateMap(ctx context.Context) (map[candidateKey][]cand
 			libByName[strings.ToLower(lib.Name)] = lib.ID
 		}
 
-		for _, mapping := range remote.LibraryMappings {
-			libID, ok := libByName[strings.ToLower(mapping.RemoteName)]
+		for _, mapping := range remote.GetLibraryMappings() {
+			libID, ok := libByName[strings.ToLower(mapping.GetRemoteName())]
 			if !ok {
-				slog.Warn("library not found on remote", "library", mapping.RemoteName, "remote_id", remote.ID)
+				slog.Warn("library not found on remote", "library", mapping.GetRemoteName(), "remote_id", remote.GetID())
 				continue
 			}
 
-			slog.Info("fetching items", "library", mapping.RemoteName, "remote_id", remote.ID)
+			slog.Info("fetching items", "library", mapping.GetRemoteName(), "remote_id", remote.GetID())
 			items, err := client.GetLeafItems(ctx, libID)
 			if err != nil {
-				slog.Warn("getting items for library", "library", mapping.RemoteName, "remote_id", remote.ID, "err", err)
+				slog.Warn("getting items for library", "library", mapping.GetRemoteName(), "remote_id", remote.GetID(), "err", err)
 				continue
 			}
 
@@ -300,15 +300,15 @@ func (s *Syncer) buildCandidateMap(ctx context.Context) (map[candidateKey][]cand
 }
 
 func (s *Syncer) pickWinner(candidates []candidate) candidate {
-	for _, tb := range s.cfg.TieBreakerFields {
+	for _, tb := range s.cfg.GetTieBreakerFields() {
 		for _, c := range candidates {
-			switch strings.ToLower(tb.Field) {
+			switch strings.ToLower(tb.GetField()) {
 			case "encoding":
-				if strings.EqualFold(c.Item.Encoding, tb.Value) {
+				if strings.EqualFold(c.Item.Encoding, tb.GetValue()) {
 					return c
 				}
 			case "resolution":
-				if strings.EqualFold(c.Item.Resolution, tb.Value) {
+				if strings.EqualFold(c.Item.Resolution, tb.GetValue()) {
 					return c
 				}
 			}

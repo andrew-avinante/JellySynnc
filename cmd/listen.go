@@ -32,7 +32,7 @@ func runListen(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	database, err := db.Connect(cfg.DBPath)
+	database, err := db.Connect(cfg.GetDBPath())
 	if err != nil {
 		return fmt.Errorf("connecting to db: %w", err)
 	}
@@ -48,9 +48,9 @@ func runListen(cmd *cobra.Command, args []string) error {
 		slog.Error("initial sync failed", "err", err)
 	}
 
-	pollInterval, err := time.ParseDuration(cfg.PollInterval)
+	pollInterval, err := time.ParseDuration(cfg.GetPollInterval())
 	if err != nil {
-		return fmt.Errorf("parsing poll_interval %q: %w", cfg.PollInterval, err)
+		return fmt.Errorf("parsing poll_interval %q: %w", cfg.GetPollInterval(), err)
 	}
 
 	scheduler, err := gocron.NewScheduler()

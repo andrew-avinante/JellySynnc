@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/viper"
@@ -15,10 +16,59 @@ type Config struct {
 	DBPath           string         `mapstructure:"db_path"`
 }
 
-type TargetConfig struct {
-	Name   string `mapstructure:"name"`
-	URL    string `mapstructure:"url"`
-	APIKey string `mapstructure:"api_key"`
+func (c *Config) Validate() error {
+	if c == nil {
+		return errors.New("config is nil")
+	}
+	if err := c.Target.Validate(); err != nil {
+		return err
+	}
+	if len(c.GetRemotes()) == 0 {
+		return errors.New("at least one remote is required")
+	}
+	return nil
+}
+
+func (c *Config) GetTarget() *TargetConfig {
+	if c == nil {
+		return nil
+	}
+	return &c.Target
+}
+
+func (c *Config) GetRemotes() []RemoteConfig {
+	if c == nil {
+		return nil
+	}
+	return c.Remotes
+}
+
+func (c *Config) GetTieBreakerFields() []TieBreaker {
+	if c == nil {
+		return nil
+	}
+	return c.TieBreakerFields
+}
+
+func (c *Config) GetPollInterval() string {
+	if c == nil {
+		return ""
+	}
+	return c.PollInterval
+}
+
+func (c *Config) GetWebhookPort() int {
+	if c == nil {
+		return 0
+	}
+	return c.WebhookPort
+}
+
+func (c *Config) GetDBPath() string {
+	if c == nil {
+		return ""
+	}
+	return c.DBPath
 }
 
 type RemoteConfig struct {
@@ -31,14 +81,72 @@ type RemoteConfig struct {
 	LibraryMappings []LibraryMapping `mapstructure:"library_mappings"`
 }
 
-type LibraryMapping struct {
-	RemoteName string `mapstructure:"remote_name"`
-	LocalPath  string `mapstructure:"local_path"`
+func (r *RemoteConfig) GetID() string {
+	if r == nil {
+		return ""
+	}
+	return r.ID
+}
+
+func (r *RemoteConfig) GetName() string {
+	if r == nil {
+		return ""
+	}
+	return r.Name
+}
+
+func (r *RemoteConfig) GetAPIURL() string {
+	if r == nil {
+		return ""
+	}
+	return r.APIURL
+}
+
+func (r *RemoteConfig) GetStrmURL() string {
+	if r == nil {
+		return ""
+	}
+	return r.StrmURL
+}
+
+func (r *RemoteConfig) GetAPIKey() string {
+	if r == nil {
+		return ""
+	}
+	return r.APIKey
+}
+
+func (r *RemoteConfig) GetRootStart() string {
+	if r == nil {
+		return ""
+	}
+	return r.RootStart
+}
+
+func (r *RemoteConfig) GetLibraryMappings() []LibraryMapping {
+	if r == nil {
+		return nil
+	}
+	return r.LibraryMappings
 }
 
 type TieBreaker struct {
 	Field string `mapstructure:"field"`
 	Value string `mapstructure:"value"`
+}
+
+func (tb *TieBreaker) GetField() string {
+	if tb == nil {
+		return ""
+	}
+	return tb.Field
+}
+
+func (tb *TieBreaker) GetValue() string {
+	if tb == nil {
+		return ""
+	}
+	return tb.Value
 }
 
 func Load(cfgFile string) (*Config, error) {
@@ -62,14 +170,8 @@ func Load(cfgFile string) (*Config, error) {
 		return nil, fmt.Errorf("unmarshaling config: %w", err)
 	}
 
-	if cfg.Target.URL == "" {
-		return nil, fmt.Errorf("target.url is required")
-	}
-	if cfg.Target.APIKey == "" {
-		return nil, fmt.Errorf("target.api_key is required")
-	}
-	if len(cfg.Remotes) == 0 {
-		return nil, fmt.Errorf("at least one remote is required")
+	if err := cfg.Validate(); err != nil {
+		return nil, err
 	}
 
 	return &cfg, nil

@@ -11,20 +11,20 @@ import (
 )
 
 func BuildURL(filePath string, remote config.RemoteConfig) (string, error) {
-	if !strings.HasPrefix(filePath, remote.RootStart) {
-		return "", fmt.Errorf("file path %q does not start with root_start %q", filePath, remote.RootStart)
+	if !strings.HasPrefix(filePath, remote.GetRootStart()) {
+		return "", fmt.Errorf("file path %q does not start with root_start %q", filePath, remote.GetRootStart())
 	}
-	remainder := strings.TrimPrefix(filePath, remote.RootStart)
-	base := strings.TrimRight(remote.StrmURL, "/")
+	remainder := strings.TrimPrefix(filePath, remote.GetRootStart())
+	base := strings.TrimRight(remote.GetStrmURL(), "/")
 	return base + remainder, nil
 }
 
 func BuildPath(item jellyfin.MediaItem, localPath string, remote config.RemoteConfig, resolutionSuffix string) (string, error) {
-	if !strings.HasPrefix(item.FilePath, remote.RootStart) {
-		return "", fmt.Errorf("file path %q does not start with root_start %q", item.FilePath, remote.RootStart)
+	if !strings.HasPrefix(item.FilePath, remote.GetRootStart()) {
+		return "", fmt.Errorf("file path %q does not start with root_start %q", item.FilePath, remote.GetRootStart())
 	}
 
-	relative := strings.TrimPrefix(item.FilePath, remote.RootStart)
+	relative := strings.TrimPrefix(item.FilePath, remote.GetRootStart())
 	relative = strings.TrimPrefix(relative, "/")
 
 	parts := strings.Split(relative, "/")

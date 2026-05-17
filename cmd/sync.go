@@ -26,7 +26,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	database, err := db.Connect(cfg.DBPath)
+	database, err := db.Connect(cfg.GetDBPath())
 	if err != nil {
 		return fmt.Errorf("connecting to db: %w", err)
 	}
