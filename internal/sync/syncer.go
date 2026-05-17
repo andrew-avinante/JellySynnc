@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/andrewavinante/JellySynnc/internal/config"
-	"github.com/andrewavinante/JellySynnc/internal/db"
-	"github.com/andrewavinante/JellySynnc/internal/jellyfin"
-	"github.com/andrewavinante/JellySynnc/internal/strm"
+	"github.com/andrew-avinante/JellySynnc/internal/config"
+	"github.com/andrew-avinante/JellySynnc/internal/db"
+	"github.com/andrew-avinante/JellySynnc/internal/jellyfin"
+	"github.com/andrew-avinante/JellySynnc/internal/strm"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
@@ -103,8 +103,8 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 	}
 
 	syncedMap := make(map[candidateKey]db.SyncedItem)
-	providerKeyToDir := make(map[string]string)           // "type:id" -> dir of existing strm
-	decodedPIDs := make(map[string]map[string]string)     // item.ID -> decoded provider IDs
+	providerKeyToDir := make(map[string]string)       // "type:id" -> dir of existing strm
+	decodedPIDs := make(map[string]map[string]string) // item.ID -> decoded provider IDs
 
 	for _, item := range syncedItems {
 		var pids map[string]string

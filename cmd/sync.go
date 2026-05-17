@@ -1,7 +1,7 @@
 package cmd
 
 import (
-	syncer "github.com/andrewavinante/JellySynnc/internal/sync"
+	syncer "github.com/andrew-avinante/JellySynnc/internal/sync"
 	"github.com/spf13/cobra"
 )
 

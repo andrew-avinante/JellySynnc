@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/andrewavinante/JellySynnc/internal/config"
-	"github.com/andrewavinante/JellySynnc/internal/jellyfin"
+	"github.com/andrew-avinante/JellySynnc/internal/config"
+	"github.com/andrew-avinante/JellySynnc/internal/jellyfin"
 )
 
 func BuildURL(filePath string, remote config.RemoteConfig) (string, error) {

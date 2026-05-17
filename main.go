@@ -3,7 +3,7 @@ package main
 import (
 	"runtime/debug"
 
-	"github.com/andrewavinante/JellySynnc/cmd"
+	"github.com/andrew-avinante/JellySynnc/cmd"
 )
 
 var version = "dev"

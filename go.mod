@@ -1,4 +1,4 @@
-module github.com/andrewavinante/JellySynnc
+module github.com/andrew-avinante/JellySynnc
 
 go 1.25.0
 

@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/andrewavinante/JellySynnc/internal/config"
-	"github.com/andrewavinante/JellySynnc/internal/jellyfin"
+	"github.com/andrew-avinante/JellySynnc/internal/config"
+	"github.com/andrew-avinante/JellySynnc/internal/jellyfin"
 )
 
 func TestBuildURL(t *testing.T) {

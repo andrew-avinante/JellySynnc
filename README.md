@@ -31,13 +31,13 @@ Media is matched by provider IDs (IMDB, TVDB, TMDB, etc.), so duplicates across 
 Requires Go 1.21+.
 
 ```bash
-go install github.com/andrewavinante/JellySynnc@latest
+go install github.com/andrew-avinante/JellySynnc@latest
 ```
 
 ### Build manually
 
 ```bash
-git clone https://github.com/andrewavinante/JellySynnc
+git clone https://github.com/andrew-avinante/JellySynnc
 cd JellySynnc
 go build -o JellySynnc .
 ```

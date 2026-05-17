@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"time"
 
-	syncer "github.com/andrewavinante/JellySynnc/internal/sync"
+	syncer "github.com/andrew-avinante/JellySynnc/internal/sync"
 	"github.com/go-co-op/gocron/v2"
 	"github.com/spf13/cobra"
 )

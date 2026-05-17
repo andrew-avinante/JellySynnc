@@ -9,10 +9,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/andrewavinante/JellySynnc/internal/config"
-	dbpkg "github.com/andrewavinante/JellySynnc/internal/db"
-	"github.com/andrewavinante/JellySynnc/internal/jellyfin"
-	"github.com/andrewavinante/JellySynnc/internal/migrations"
+	"github.com/andrew-avinante/JellySynnc/internal/config"
+	dbpkg "github.com/andrew-avinante/JellySynnc/internal/db"
+	"github.com/andrew-avinante/JellySynnc/internal/jellyfin"
+	"github.com/andrew-avinante/JellySynnc/internal/migrations"
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
@@ -142,10 +142,10 @@ func TestPickWinner(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
+		name             string
 		tieBreakerFields []config.TieBreaker
-		candidates     []candidate
-		wantRemoteID   string
+		candidates       []candidate
+		wantRemoteID     string
 	}{
 		{
 			name:         "single candidate always wins",
@@ -158,40 +158,40 @@ func TestPickWinner(t *testing.T) {
 			wantRemoteID: "remote1",
 		},
 		{
-			name:           "tie-breaker on encoding selects matching candidate",
+			name:             "tie-breaker on encoding selects matching candidate",
 			tieBreakerFields: []config.TieBreaker{{Field: "encoding", Value: "h265"}},
-			candidates:     []candidate{makeCandidate("remote1", "h264", "1080p"), makeCandidate("remote2", "h265", "1080p")},
-			wantRemoteID:   "remote2",
+			candidates:       []candidate{makeCandidate("remote1", "h264", "1080p"), makeCandidate("remote2", "h265", "1080p")},
+			wantRemoteID:     "remote2",
 		},
 		{
-			name:           "tie-breaker on resolution selects matching candidate",
+			name:             "tie-breaker on resolution selects matching candidate",
 			tieBreakerFields: []config.TieBreaker{{Field: "resolution", Value: "4K"}},
-			candidates:     []candidate{makeCandidate("remote1", "h265", "1080p"), makeCandidate("remote2", "h265", "4K")},
-			wantRemoteID:   "remote2",
+			candidates:       []candidate{makeCandidate("remote1", "h265", "1080p"), makeCandidate("remote2", "h265", "4K")},
+			wantRemoteID:     "remote2",
 		},
 		{
-			name:           "tie-breaker is case-insensitive",
+			name:             "tie-breaker is case-insensitive",
 			tieBreakerFields: []config.TieBreaker{{Field: "Encoding", Value: "H265"}},
-			candidates:     []candidate{makeCandidate("remote1", "h264", "1080p"), makeCandidate("remote2", "h265", "1080p")},
-			wantRemoteID:   "remote2",
+			candidates:       []candidate{makeCandidate("remote1", "h264", "1080p"), makeCandidate("remote2", "h265", "1080p")},
+			wantRemoteID:     "remote2",
 		},
 		{
-			name:           "first tie-breaker match wins, second ignored",
+			name:             "first tie-breaker match wins, second ignored",
 			tieBreakerFields: []config.TieBreaker{{Field: "encoding", Value: "h265"}, {Field: "resolution", Value: "4K"}},
-			candidates:     []candidate{makeCandidate("remote1", "h265", "1080p"), makeCandidate("remote2", "h264", "4K")},
-			wantRemoteID:   "remote1",
+			candidates:       []candidate{makeCandidate("remote1", "h265", "1080p"), makeCandidate("remote2", "h264", "4K")},
+			wantRemoteID:     "remote1",
 		},
 		{
-			name:           "no tie-breaker match falls back to first candidate",
+			name:             "no tie-breaker match falls back to first candidate",
 			tieBreakerFields: []config.TieBreaker{{Field: "encoding", Value: "av1"}},
-			candidates:     []candidate{makeCandidate("remote1", "h264", "1080p"), makeCandidate("remote2", "h265", "1080p")},
-			wantRemoteID:   "remote1",
+			candidates:       []candidate{makeCandidate("remote1", "h264", "1080p"), makeCandidate("remote2", "h265", "1080p")},
+			wantRemoteID:     "remote1",
 		},
 		{
-			name:           "tie-breaker matches first candidate",
+			name:             "tie-breaker matches first candidate",
 			tieBreakerFields: []config.TieBreaker{{Field: "encoding", Value: "h264"}},
-			candidates:     []candidate{makeCandidate("remote1", "h264", "1080p"), makeCandidate("remote2", "h265", "1080p")},
-			wantRemoteID:   "remote1",
+			candidates:       []candidate{makeCandidate("remote1", "h264", "1080p"), makeCandidate("remote2", "h265", "1080p")},
+			wantRemoteID:     "remote1",
 		},
 	}
 
@@ -229,7 +229,7 @@ type jfMediaStream struct {
 
 type jfMediaSource struct {
 	Path         string          `json:"Path"`
-	MediaStreams  []jfMediaStream `json:"MediaStreams"`
+	MediaStreams []jfMediaStream `json:"MediaStreams"`
 }
 
 type jfItem struct {
@@ -303,7 +303,7 @@ func TestRun_AddsNewItem(t *testing.T) {
 				Type:        "Movie",
 				ProviderIds: map[string]string{"Tmdb": "12345"},
 				MediaSources: []jfMediaSource{{
-					Path:        "/media/Movies/Test Movie (2020)/movie.mkv",
+					Path:         "/media/Movies/Test Movie (2020)/movie.mkv",
 					MediaStreams: []jfMediaStream{{Type: "Video", Height: 1080, Codec: "hevc"}},
 				}},
 			}},
@@ -372,7 +372,7 @@ func TestRun_SkipsItemAlreadyOnTarget(t *testing.T) {
 				Type:        "Movie",
 				ProviderIds: map[string]string{"Tmdb": "12345"},
 				MediaSources: []jfMediaSource{{
-					Path:        "/target/Movies/Existing Movie/movie.strm",
+					Path:         "/target/Movies/Existing Movie/movie.strm",
 					MediaStreams: []jfMediaStream{{Type: "Video", Height: 0, Codec: ""}},
 				}},
 			}},
@@ -388,7 +388,7 @@ func TestRun_SkipsItemAlreadyOnTarget(t *testing.T) {
 				Type:        "Movie",
 				ProviderIds: map[string]string{"Tmdb": "12345"},
 				MediaSources: []jfMediaSource{{
-					Path:        "/media/Movies/Existing Movie/movie.mkv",
+					Path:         "/media/Movies/Existing Movie/movie.mkv",
 					MediaStreams: []jfMediaStream{{Type: "Video", Height: 1080, Codec: "hevc"}},
 				}},
 			}},
@@ -452,7 +452,7 @@ func TestRun_RemovesStaleItem(t *testing.T) {
 				Type:        "Movie",
 				ProviderIds: map[string]string{"Tmdb": "11111"},
 				MediaSources: []jfMediaSource{{
-					Path:        "/media/Movies/Still Present Movie/movie.mkv",
+					Path:         "/media/Movies/Still Present Movie/movie.mkv",
 					MediaStreams: []jfMediaStream{{Type: "Video", Height: 1080, Codec: "h264"}},
 				}},
 			}},
@@ -524,7 +524,7 @@ func TestRun_TieBreakerSelectsWinner(t *testing.T) {
 				Type:        "Movie",
 				ProviderIds: map[string]string{"Tmdb": "55555"},
 				MediaSources: []jfMediaSource{{
-					Path:        "/media1/Movies/Shared Movie/movie.mkv",
+					Path:         "/media1/Movies/Shared Movie/movie.mkv",
 					MediaStreams: []jfMediaStream{{Type: "Video", Height: 1080, Codec: "h264"}},
 				}},
 			}},
@@ -539,7 +539,7 @@ func TestRun_TieBreakerSelectsWinner(t *testing.T) {
 				Type:        "Movie",
 				ProviderIds: map[string]string{"Tmdb": "55555"},
 				MediaSources: []jfMediaSource{{
-					Path:        "/media2/Movies/Shared Movie/movie.mkv",
+					Path:         "/media2/Movies/Shared Movie/movie.mkv",
 					MediaStreams: []jfMediaStream{{Type: "Video", Height: 1080, Codec: "hevc"}},
 				}},
 			}},
@@ -555,19 +555,19 @@ func TestRun_TieBreakerSelectsWinner(t *testing.T) {
 		},
 		Remotes: []config.RemoteConfig{
 			{
-				ID:        "remote1",
-				APIURL:    remote1Srv.URL,
-				StrmURL:   "http://stream1.example.com",
-				APIKey:    "key",
-				RootStart: "/media1",
+				ID:              "remote1",
+				APIURL:          remote1Srv.URL,
+				StrmURL:         "http://stream1.example.com",
+				APIKey:          "key",
+				RootStart:       "/media1",
 				LibraryMappings: []config.LibraryMapping{{RemoteName: "Movies", LocalPath: tmpDir}},
 			},
 			{
-				ID:        "remote2",
-				APIURL:    remote2Srv.URL,
-				StrmURL:   "http://stream2.example.com",
-				APIKey:    "key",
-				RootStart: "/media2",
+				ID:              "remote2",
+				APIURL:          remote2Srv.URL,
+				StrmURL:         "http://stream2.example.com",
+				APIKey:          "key",
+				RootStart:       "/media2",
 				LibraryMappings: []config.LibraryMapping{{RemoteName: "Movies", LocalPath: tmpDir}},
 			},
 		},
@@ -610,7 +610,7 @@ func TestRun_Idempotent(t *testing.T) {
 				Type:        "Movie",
 				ProviderIds: map[string]string{"Tmdb": "77777"},
 				MediaSources: []jfMediaSource{{
-					Path:        "/media/Movies/Stable Movie/movie.mkv",
+					Path:         "/media/Movies/Stable Movie/movie.mkv",
 					MediaStreams: []jfMediaStream{{Type: "Video", Height: 720, Codec: "h264"}},
 				}},
 			}},
@@ -621,11 +621,11 @@ func TestRun_Idempotent(t *testing.T) {
 	cfg := &config.Config{
 		Target: config.TargetConfig{URL: targetSrv.URL, APIKey: "key"},
 		Remotes: []config.RemoteConfig{{
-			ID:      "remote1",
-			APIURL:  remoteSrv.URL,
-			StrmURL: "http://stream.example.com",
-			APIKey:  "key",
-			RootStart: "/media",
+			ID:              "remote1",
+			APIURL:          remoteSrv.URL,
+			StrmURL:         "http://stream.example.com",
+			APIKey:          "key",
+			RootStart:       "/media",
 			LibraryMappings: []config.LibraryMapping{{RemoteName: "Movies", LocalPath: tmpDir}},
 		}},
 	}

@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/andrewavinante/JellySynnc/internal/config"
-	"github.com/andrewavinante/JellySynnc/internal/db"
-	"github.com/andrewavinante/JellySynnc/internal/migrations"
+	"github.com/andrew-avinante/JellySynnc/internal/config"
+	"github.com/andrew-avinante/JellySynnc/internal/db"
+	"github.com/andrew-avinante/JellySynnc/internal/migrations"
 	"github.com/jmoiron/sqlx"
 	"github.com/spf13/cobra"
 )
