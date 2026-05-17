@@ -179,6 +179,14 @@ https://jellyfin.friend.example.com/Videos/abc123/stream?api_key=...
 
 The file is placed in the local path you configure under `library_mappings`, preserving the original directory structure from the remote (minus the library root).
 
+## Planned features
+
+- **Webhook mode**: receive Jellyfin webhook events (`ItemAdded`, `ItemDeleted`) to sync in real time rather than on a polling interval — eliminates the lag between a remote adding content and the `.strm` file appearing locally
+- **Post-sync library scan**: after writing or deleting `.strm` files, trigger a Jellyfin library scan on the affected local libraries via the API so new content appears immediately without waiting for Jellyfin's scheduled scan
+- **Dry-run mode**: preview what would be added or removed — paths, URLs, affected remotes — without writing any files or touching the database; useful for validating config before a first run
+- **Push notifications**: emit a summary on sync completion or error to ntfy, Discord, or Slack
+- **Selective sync filters**: per-remote or global rules to include or exclude media by type, year range, genre, or title pattern
+
 ## Database
 
 JellySynnc keeps a SQLite database (`JellySynnc.db` by default) with two tables:
