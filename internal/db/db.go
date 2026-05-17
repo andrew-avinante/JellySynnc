@@ -37,20 +37,29 @@ func Connect(dbPath string) (*sqlx.DB, error) {
 		return nil, fmt.Errorf("opening sqlite: %w", err)
 	}
 
-	db := sqlx.NewDb(sqlDB, "sqlite")
+	database := sqlx.NewDb(sqlDB, "sqlite")
 
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		return nil, fmt.Errorf("setting WAL mode: %w", err)
+	var retErr error
+	defer func() {
+		if retErr != nil {
+			database.Close()
+		}
+	}()
+
+	if _, err := database.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		retErr = fmt.Errorf("setting WAL mode: %w", err)
+		return nil, retErr
 	}
-	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
-		return nil, fmt.Errorf("enabling foreign keys: %w", err)
+	if _, err := database.Exec("PRAGMA foreign_keys=ON"); err != nil {
+		retErr = fmt.Errorf("enabling foreign keys: %w", err)
+		return nil, retErr
+	}
+	if err := database.Ping(); err != nil {
+		retErr = fmt.Errorf("pinging db: %w", err)
+		return nil, retErr
 	}
 
-	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("pinging db: %w", err)
-	}
-
-	return db, nil
+	return database, nil
 }
 
 func InsertSyncedItem(db *sqlx.DB, item SyncedItem) error {

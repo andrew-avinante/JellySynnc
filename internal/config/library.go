@@ -1,8 +1,9 @@
 package config
 
 type LibraryMapping struct {
-	RemoteName string `mapstructure:"remote_name"`
-	LocalPath  string `mapstructure:"local_path"`
+	RemoteName             string `mapstructure:"remote_name"`
+	LocalPath              string `mapstructure:"local_path"`
+	SyncUnknownProviderIDs bool   `mapstructure:"sync_unknown_provider_ids"`
 }
 
 func (l *LibraryMapping) GetRemoteName() string {
@@ -17,4 +18,11 @@ func (l *LibraryMapping) GetLocalPath() string {
 		return ""
 	}
 	return l.LocalPath
+}
+
+func (l *LibraryMapping) GetSyncUnknownProviderIDs() bool {
+	if l == nil {
+		return false
+	}
+	return l.SyncUnknownProviderIDs
 }

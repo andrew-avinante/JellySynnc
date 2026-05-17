@@ -72,6 +72,8 @@ func (c *Client) GetLibraries(ctx context.Context) ([]Library, error) {
 func (c *Client) GetLeafItems(ctx context.Context, libraryID string) ([]MediaItem, error) {
 	result, _, err := c.inner.ItemsAPI.GetItems(ctx).
 		ParentId(libraryID).
+		IncludeItemTypes([]api.BaseItemKind{api.BASEITEMKIND_MOVIE, api.BASEITEMKIND_EPISODE}).
+		Recursive(true).
 		Fields([]api.ItemFields{
 			api.ITEMFIELDS_PROVIDER_IDS,
 			api.ITEMFIELDS_PATH,
@@ -84,20 +86,7 @@ func (c *Client) GetLeafItems(ctx context.Context, libraryID string) ([]MediaIte
 
 	var leaves []MediaItem
 	for _, item := range result.GetItems() {
-		switch item.GetType() {
-		case api.BASEITEMKIND_MOVIE, api.BASEITEMKIND_EPISODE:
-			mi, err := c.enrichItem(ctx, item)
-			if err != nil {
-				continue
-			}
-			leaves = append(leaves, mi)
-		default:
-			children, err := c.GetLeafItems(ctx, item.GetId())
-			if err != nil {
-				continue
-			}
-			leaves = append(leaves, children...)
-		}
+		leaves = append(leaves, c.enrichItem(item))
 	}
 	return leaves, nil
 }
@@ -120,10 +109,10 @@ func (c *Client) GetItem(ctx context.Context, itemID string) (MediaItem, error) 
 		return MediaItem{}, ErrItemNotFound
 	}
 
-	return c.enrichItem(ctx, items[0])
+	return c.enrichItem(items[0]), nil
 }
 
-func (c *Client) enrichItem(ctx context.Context, item api.BaseItemDto) (MediaItem, error) {
+func (c *Client) enrichItem(item api.BaseItemDto) MediaItem {
 	mi := MediaItem{
 		JellyfinID:    item.GetId(),
 		Name:          item.GetName(),
@@ -135,16 +124,11 @@ func (c *Client) enrichItem(ctx context.Context, item api.BaseItemDto) (MediaIte
 		EpisodeNumber: int(item.GetIndexNumber()),
 	}
 
-	pbInfo, _, err := c.inner.MediaInfoAPI.GetPlaybackInfo(ctx, item.GetId()).Execute()
-	if err != nil {
-		return MediaItem{}, fmt.Errorf("GetPlaybackInfo(%s): %w", item.GetId(), err)
-	}
-
-	sources := pbInfo.GetMediaSources()
+	sources := item.GetMediaSources()
 	if len(sources) == 0 {
 		mi.Resolution = "unknown"
 		mi.Encoding = "unknown"
-		return mi, nil
+		return mi
 	}
 
 	src := sources[0]
@@ -165,7 +149,7 @@ func (c *Client) enrichItem(ctx context.Context, item api.BaseItemDto) (MediaIte
 		mi.Encoding = "unknown"
 	}
 
-	return mi, nil
+	return mi
 }
 
 func normalizeProviderIDs(ids map[string]string) map[string]string {

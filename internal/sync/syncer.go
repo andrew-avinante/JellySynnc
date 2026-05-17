@@ -3,7 +3,6 @@ package sync
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -24,7 +23,6 @@ type candidateKey struct {
 }
 
 type candidate struct {
-	RemoteIdx      int
 	Remote         config.RemoteConfig
 	Item           jellyfin.MediaItem
 	LibraryMapping config.LibraryMapping
@@ -82,25 +80,39 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 		return fmt.Errorf("building target maps: %w", err)
 	}
 
-	// Step 2: Load existing synced items from DB
+	// Provider-key-only set: lets us detect items already on target even when
+	// Jellyfin can't probe .strm files and reports resolution as "unknown".
+	targetProviderKeys := make(map[string]struct{}, len(targetCoverage))
+	for key := range targetCoverage {
+		targetProviderKeys[key.ProviderKey] = struct{}{}
+	}
+
+	// Step 2: Load and decode existing synced items from DB once
 	syncedItems, err := db.GetAllSyncedItems(s.db)
 	if err != nil {
 		return fmt.Errorf("loading synced items: %w", err)
 	}
 
 	syncedMap := make(map[candidateKey]db.SyncedItem)
+	providerKeyToDir := make(map[string]string)           // "type:id" -> dir of existing strm
+	decodedPIDs := make(map[string]map[string]string)     // item.ID -> decoded provider IDs
+
 	for _, item := range syncedItems {
 		var pids map[string]string
 		if err := json.Unmarshal([]byte(item.ProviderIDs), &pids); err != nil {
+			slog.Warn("corrupt provider_ids in db, skipping", "id", item.ID, "err", err)
 			continue
 		}
+		decodedPIDs[item.ID] = pids
+		dir := filepath.Dir(item.StrmPath)
 		for k, v := range pids {
-			key := candidateKey{ProviderKey: k + ":" + v, Resolution: item.Resolution}
-			syncedMap[key] = item
+			pk := k + ":" + v
+			syncedMap[candidateKey{ProviderKey: pk, Resolution: item.Resolution}] = item
+			providerKeyToDir[pk] = dir
 		}
 	}
 
-	// Step 3: Build candidate map
+	// Step 3: Build candidate map (fetches all items from all remotes)
 	candidateMap, err := s.buildCandidateMap(ctx)
 	if err != nil {
 		return fmt.Errorf("building candidate map: %w", err)
@@ -119,7 +131,11 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 			resolutionsByProvider[pk] = make(map[string]struct{})
 		}
 		for res := range resSet {
-			resolutionsByProvider[pk][res] = struct{}{}
+			// Skip "unknown" — .strm files on target can't report resolution;
+			// counting it as a real resolution causes false multi-resolution detection.
+			if res != "unknown" {
+				resolutionsByProvider[pk][res] = struct{}{}
+			}
 		}
 	}
 
@@ -133,6 +149,11 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 		if _, exists := targetCoverage[key]; exists {
 			continue
 		}
+		// Item exists on target but .strm reported unknown resolution — skip unless
+		// there are genuinely multiple resolutions from remotes that need separate files.
+		if _, exists := targetProviderKeys[key.ProviderKey]; exists && !multiResolution[key.ProviderKey] {
+			continue
+		}
 
 		winner := s.pickWinner(candidates)
 
@@ -141,7 +162,7 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 			resolutionSuffix = key.Resolution
 		}
 
-		localPath := s.findExistingLocalPath(key.ProviderKey, winner.Item.ProviderIDs, syncedItems, syncedMap)
+		localPath := findExistingLocalPath(key.ProviderKey, winner.Item.ProviderIDs, providerKeyToDir)
 		if localPath == "" {
 			localPath = winner.LibraryMapping.GetLocalPath()
 		}
@@ -179,11 +200,16 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 				slog.Warn("writing strm", "path", strmPath, "err", err)
 				continue
 			}
+			provIDs, err := marshalProviderIDs(winner.Item.ProviderIDs)
+			if err != nil {
+				slog.Warn("marshaling provider IDs", "err", err)
+				continue
+			}
 			if err := db.InsertSyncedItem(s.db, db.SyncedItem{
 				ID:             uuid.New().String(),
 				RemoteID:       winner.Remote.GetID(),
 				JellyfinItemID: winner.Item.JellyfinID,
-				ProviderIDs:    marshalProviderIDs(winner.Item.ProviderIDs),
+				ProviderIDs:    provIDs,
 				Resolution:     key.Resolution,
 				Encoding:       winner.Item.Encoding,
 				StrmPath:       strmPath,
@@ -194,17 +220,39 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 		}
 	}
 
-	// Step 6: Removal pass
+	// Step 6: Removal pass — use provider IDs from the already-fetched candidateMap
+	// so we avoid N extra API calls and use stable cross-server IDs.
+	remoteCurrentKeys := make(map[string]map[string]struct{})
+	for key, candidates := range candidateMap {
+		for _, c := range candidates {
+			rid := c.Remote.GetID()
+			if remoteCurrentKeys[rid] == nil {
+				remoteCurrentKeys[rid] = make(map[string]struct{})
+			}
+			remoteCurrentKeys[rid][key.ProviderKey] = struct{}{}
+		}
+	}
+
 	for _, row := range syncedItems {
-		remote, ok := s.remotes[row.RemoteID]
+		pids, ok := decodedPIDs[row.ID]
 		if !ok {
-			slog.Warn("no client for remote, skipping removal check", "remote_id", row.RemoteID)
+			continue // skipped above due to corrupt JSON
+		}
+		currentKeys, ok := remoteCurrentKeys[row.RemoteID]
+		if !ok {
+			slog.Warn("no remote found for synced item, skipping removal check", "remote_id", row.RemoteID)
 			continue
 		}
-
-		_, err := remote.GetItem(ctx, row.JellyfinItemID)
-		if errors.Is(err, jellyfin.ErrItemNotFound) {
-			slog.Info("item gone from remote, removing strm", "item_id", row.JellyfinItemID, "remote_id", row.RemoteID, "path", row.StrmPath)
+		stillExists := false
+		for k, v := range pids {
+			if _, found := currentKeys[k+":"+v]; found {
+				stillExists = true
+				break
+			}
+		}
+		if !stillExists {
+			slog.Info("item gone from remote, removing strm",
+				"remote_id", row.RemoteID, "path", row.StrmPath)
 			if err := strm.Delete(row.StrmPath); err != nil {
 				slog.Warn("deleting strm", "path", row.StrmPath, "err", err)
 			}
@@ -212,8 +260,6 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 				slog.Warn("deleting synced item", "id", row.ID, "err", err)
 			}
 			itemsRemoved++
-		} else if err != nil {
-			slog.Warn("checking item on remote", "item_id", row.JellyfinItemID, "remote_id", row.RemoteID, "err", err)
 		}
 	}
 
@@ -254,7 +300,7 @@ func (s *Syncer) buildTargetMaps(ctx context.Context) (map[candidateKey]struct{}
 func (s *Syncer) buildCandidateMap(ctx context.Context) (map[candidateKey][]candidate, error) {
 	candidateMap := make(map[candidateKey][]candidate)
 
-	for remoteIdx, remote := range s.cfg.GetRemotes() {
+	for _, remote := range s.cfg.GetRemotes() {
 		client := s.remotes[remote.GetID()]
 		libs, err := client.GetLibraries(ctx)
 		if err != nil {
@@ -282,11 +328,31 @@ func (s *Syncer) buildCandidateMap(ctx context.Context) (map[candidateKey][]cand
 			}
 
 			for _, item := range items {
+				if len(item.ProviderIDs) == 0 {
+					if !mapping.GetSyncUnknownProviderIDs() {
+						slog.Warn("skipping item with no provider IDs",
+							"name", item.Name,
+							"library", mapping.GetRemoteName(),
+							"remote_id", remote.GetID(),
+							"hint", "set sync_unknown_provider_ids: true in library mapping to sync anyway",
+						)
+						continue
+					}
+					// Synthetic key so items with no provider IDs still enter the
+					// candidate map. Uses remote+jellyfin ID since provider IDs are absent.
+					pk := "jellyfin:" + remote.GetID() + ":" + item.JellyfinID
+					key := candidateKey{ProviderKey: pk, Resolution: item.Resolution}
+					candidateMap[key] = append(candidateMap[key], candidate{
+						Remote:         remote,
+						Item:           item,
+						LibraryMapping: mapping,
+					})
+					continue
+				}
 				for k, v := range item.ProviderIDs {
 					pk := k + ":" + v
 					key := candidateKey{ProviderKey: pk, Resolution: item.Resolution}
 					candidateMap[key] = append(candidateMap[key], candidate{
-						RemoteIdx:      remoteIdx,
 						Remote:         remote,
 						Item:           item,
 						LibraryMapping: mapping,
@@ -317,31 +383,21 @@ func (s *Syncer) pickWinner(candidates []candidate) candidate {
 	return candidates[0]
 }
 
-func (s *Syncer) findExistingLocalPath(providerKey string, itemProviderIDs map[string]string, syncedItems []db.SyncedItem, syncedMap map[candidateKey]db.SyncedItem) string {
-	// Check syncedMap for any entry with same providerKey (any resolution)
-	for key, item := range syncedMap {
-		if key.ProviderKey == providerKey {
-			return filepath.Dir(item.StrmPath)
+// findExistingLocalPath returns the directory of a previously synced strm for
+// this item so multi-resolution variants land alongside existing files.
+func findExistingLocalPath(providerKey string, itemProviderIDs map[string]string, providerKeyToDir map[string]string) string {
+	if dir, ok := providerKeyToDir[providerKey]; ok {
+		return dir
+	}
+	for k, v := range itemProviderIDs {
+		if dir, ok := providerKeyToDir[k+":"+v]; ok {
+			return dir
 		}
 	}
-
-	// Scan all synced items for any matching provider ID
-	for _, row := range syncedItems {
-		var pids map[string]string
-		if err := json.Unmarshal([]byte(row.ProviderIDs), &pids); err != nil {
-			continue
-		}
-		for k, v := range itemProviderIDs {
-			if pids[k] == v {
-				return filepath.Dir(row.StrmPath)
-			}
-		}
-	}
-
 	return ""
 }
 
-func marshalProviderIDs(ids map[string]string) string {
-	data, _ := json.Marshal(ids)
-	return string(data)
+func marshalProviderIDs(ids map[string]string) (string, error) {
+	data, err := json.Marshal(ids)
+	return string(data), err
 }

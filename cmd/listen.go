@@ -8,9 +8,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/andrewavinante/JellySynnc/internal/config"
-	"github.com/andrewavinante/JellySynnc/internal/db"
-	"github.com/andrewavinante/JellySynnc/internal/migrations"
 	syncer "github.com/andrewavinante/JellySynnc/internal/sync"
 	"github.com/go-co-op/gocron/v2"
 	"github.com/spf13/cobra"
@@ -27,24 +24,18 @@ func init() {
 }
 
 func runListen(cmd *cobra.Command, args []string) error {
-	cfg, err := config.Load(cfgFile)
+	cfg, database, err := setup(cfgFile)
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
-	}
-
-	database, err := db.Connect(cfg.GetDBPath())
-	if err != nil {
-		return fmt.Errorf("connecting to db: %w", err)
+		return err
 	}
 	defer database.Close()
 
-	if err := db.Migrate(database, migrations.FS); err != nil {
-		return fmt.Errorf("running migrations: %w", err)
-	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	s := syncer.New(cfg, database)
 
-	if err := s.Run(cmd.Context()); err != nil {
+	if err := s.Run(ctx); err != nil {
 		slog.Error("initial sync failed", "err", err)
 	}
 
@@ -61,7 +52,7 @@ func runListen(cmd *cobra.Command, args []string) error {
 	if _, err := scheduler.NewJob(
 		gocron.DurationJob(pollInterval),
 		gocron.NewTask(func() {
-			if err := s.Run(context.Background()); err != nil {
+			if err := s.Run(ctx); err != nil {
 				slog.Error("scheduled sync failed", "err", err)
 			}
 		}),
@@ -72,9 +63,6 @@ func runListen(cmd *cobra.Command, args []string) error {
 	scheduler.Start()
 	defer scheduler.Shutdown()
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	<-ctx.Done()
-
 	return nil
 }

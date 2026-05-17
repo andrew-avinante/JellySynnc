@@ -95,6 +95,8 @@ remotes:
         local_path: "/media/strm/Movies"
       - remote_name: "TV Shows"
         local_path: "/media/strm/TV Shows"
+        # Sync items that have no IMDB/TVDB/TMDB IDs (default: false)
+        sync_unknown_provider_ids: true
 
   - id: "remote-b"
     name: "Second Server"
@@ -129,6 +131,7 @@ tie_breaker_fields:
 | `remotes[].api_key` | string | required | API key for the remote |
 | `remotes[].root_start` | string | required | Filesystem prefix to strip from remote paths |
 | `remotes[].library_mappings` | list | required | Maps remote library names to local `.strm` directories |
+| `remotes[].library_mappings[].sync_unknown_provider_ids` | bool | `false` | Sync items with no provider IDs (IMDB/TVDB/TMDB); uses a synthetic `jellyfin:<remote_id>:<item_id>` key for deduplication |
 | `tie_breaker_fields` | list | none | Ordered preference rules for multi-remote deduplication |
 
 ### Getting a Jellyfin API key
