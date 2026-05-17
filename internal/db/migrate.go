@@ -1,65 +1,33 @@
 package db
 
 import (
-	"fmt"
+	"errors"
 	"io/fs"
-	"sort"
-	"strings"
 
+	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/database/sqlite"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jmoiron/sqlx"
 )
 
 func Migrate(db *sqlx.DB, migrations fs.FS) error {
-	if _, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version    TEXT PRIMARY KEY,
-			applied_at DATETIME NOT NULL DEFAULT (datetime('now'))
-		)
-	`); err != nil {
-		return fmt.Errorf("creating schema_migrations: %w", err)
-	}
-
-	entries, err := fs.Glob(migrations, "*.up.sql")
+	src, err := iofs.New(migrations, ".")
 	if err != nil {
-		return fmt.Errorf("listing migrations: %w", err)
-	}
-	sort.Strings(entries)
-
-	for _, name := range entries {
-		var count int
-		if err := db.Get(&count, `SELECT COUNT(*) FROM schema_migrations WHERE version = ?`, name); err != nil {
-			return fmt.Errorf("checking migration %s: %w", name, err)
-		}
-		if count > 0 {
-			continue
-		}
-
-		data, err := fs.ReadFile(migrations, name)
-		if err != nil {
-			return fmt.Errorf("reading migration %s: %w", name, err)
-		}
-
-		for _, stmt := range splitStatements(string(data)) {
-			if _, err := db.Exec(stmt); err != nil {
-				return fmt.Errorf("executing migration %s: %w", name, err)
-			}
-		}
-
-		if _, err := db.Exec(`INSERT INTO schema_migrations (version) VALUES (?)`, name); err != nil {
-			return fmt.Errorf("recording migration %s: %w", name, err)
-		}
+		return err
 	}
 
+	driver, err := sqlite.WithInstance(db.DB, &sqlite.Config{DatabaseName: "sqlite"})
+	if err != nil {
+		return err
+	}
+
+	m, err := migrate.NewWithInstance("iofs", src, "sqlite", driver)
+	if err != nil {
+		return err
+	}
+
+	if err := m.Up(); err != nil && !errors.Is(err, migrate.ErrNoChange) {
+		return err
+	}
 	return nil
-}
-
-func splitStatements(sql string) []string {
-	var stmts []string
-	for _, s := range strings.Split(sql, ";") {
-		s = strings.TrimSpace(s)
-		if s != "" {
-			stmts = append(stmts, s)
-		}
-	}
-	return stmts
 }
