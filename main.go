@@ -1,7 +1,19 @@
 package main
 
-import "github.com/andrewavinante/JellySynnc/cmd"
+import (
+	"runtime/debug"
+
+	"github.com/andrewavinante/JellySynnc/cmd"
+)
+
+var version = "dev"
 
 func main() {
-	cmd.Execute()
+	v := version
+	if v == "dev" {
+		if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+			v = info.Main.Version
+		}
+	}
+	cmd.Execute(v)
 }
