@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS synced_items;
+DROP TABLE IF EXISTS sync_runs;
