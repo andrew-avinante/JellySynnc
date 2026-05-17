@@ -22,6 +22,15 @@ type candidateKey struct {
 	Resolution  string
 }
 
+// episodeFallbackKey identifies an episode by (series ProviderID, season, episode).
+// Used to match episodes across servers when episode-level ProviderIDs disagree
+// (e.g. TVDB renumbered episodes between scrapes) but series IDs + S/E align.
+type episodeFallbackKey struct {
+	SeriesProviderKey string
+	Season            int
+	Episode           int
+}
+
 type candidate struct {
 	Remote         config.RemoteConfig
 	Item           jellyfin.MediaItem
@@ -75,7 +84,7 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 	}()
 
 	// Step 1: Build target coverage maps
-	targetCoverage, targetIdentities, err := s.buildTargetMaps(ctx)
+	targetCoverage, targetIdentities, targetEpisodeFallback, err := s.buildTargetMaps(ctx)
 	if err != nil {
 		return fmt.Errorf("building target maps: %w", err)
 	}
@@ -175,6 +184,24 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 				break
 			}
 		}
+
+		// Episode-number fallback: match by (series PID, season, episode) when episode-level
+		// PIDs disagree between servers (e.g. TVDB renumbering). Only for Episode items.
+		if !covered && winner.Item.Type == "Episode" && winner.Item.SeasonNumber > 0 && winner.Item.EpisodeNumber > 0 {
+			for k, v := range winner.Item.SeriesProviderIDs {
+				spk := k + ":" + v
+				fk := episodeFallbackKey{
+					SeriesProviderKey: spk,
+					Season:            winner.Item.SeasonNumber,
+					Episode:           winner.Item.EpisodeNumber,
+				}
+				if _, exists := targetEpisodeFallback[fk]; exists {
+					covered = true
+					break
+				}
+			}
+		}
+
 		if covered {
 			continue
 		}
@@ -303,13 +330,19 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 	return nil
 }
 
-func (s *Syncer) buildTargetMaps(ctx context.Context) (map[candidateKey]struct{}, map[string]map[string]struct{}, error) {
+func (s *Syncer) buildTargetMaps(ctx context.Context) (
+	map[candidateKey]struct{},
+	map[string]map[string]struct{},
+	map[episodeFallbackKey]struct{},
+	error,
+) {
 	coverage := make(map[candidateKey]struct{})
 	identities := make(map[string]map[string]struct{})
+	episodeFallback := make(map[episodeFallbackKey]struct{})
 
 	libs, err := s.target.GetLibraries(ctx)
 	if err != nil {
-		return nil, nil, fmt.Errorf("getting target libraries: %w", err)
+		return nil, nil, nil, fmt.Errorf("getting target libraries: %w", err)
 	}
 
 	for _, lib := range libs {
@@ -328,10 +361,20 @@ func (s *Syncer) buildTargetMaps(ctx context.Context) (map[candidateKey]struct{}
 				}
 				identities[pk][item.Resolution] = struct{}{}
 			}
+			if item.Type == "Episode" && item.SeasonNumber > 0 && item.EpisodeNumber > 0 {
+				for k, v := range item.SeriesProviderIDs {
+					spk := k + ":" + v
+					episodeFallback[episodeFallbackKey{
+						SeriesProviderKey: spk,
+						Season:            item.SeasonNumber,
+						Episode:           item.EpisodeNumber,
+					}] = struct{}{}
+				}
+			}
 		}
 	}
 
-	return coverage, identities, nil
+	return coverage, identities, episodeFallback, nil
 }
 
 func (s *Syncer) buildCandidateMap(ctx context.Context) (map[candidateKey][]candidate, error) {

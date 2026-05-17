@@ -18,17 +18,18 @@ type Library struct {
 }
 
 type MediaItem struct {
-	JellyfinID     string
-	Name           string
-	Type           string
-	ProviderIDs    map[string]string
-	FilePath       string
-	Resolution     string
-	Encoding       string
-	SeriesName     string
-	SeriesID       string
-	SeasonNumber   int
-	EpisodeNumber  int
+	JellyfinID        string
+	Name              string
+	Type              string
+	ProviderIDs       map[string]string
+	FilePath          string
+	Resolution        string
+	Encoding          string
+	SeriesName        string
+	SeriesID          string
+	SeriesProviderIDs map[string]string
+	SeasonNumber      int
+	EpisodeNumber     int
 }
 
 type Client struct {
@@ -70,6 +71,13 @@ func (c *Client) GetLibraries(ctx context.Context) ([]Library, error) {
 }
 
 func (c *Client) GetLeafItems(ctx context.Context, libraryID string) ([]MediaItem, error) {
+	// Fetch series provider IDs first so we can attach them to episodes for
+	// (series, season, episode) fallback matching when episode-level PIDs disagree.
+	seriesPIDs, err := c.getSeriesProviderIDs(ctx, libraryID)
+	if err != nil {
+		seriesPIDs = nil
+	}
+
 	result, _, err := c.inner.ItemsAPI.GetItems(ctx).
 		ParentId(libraryID).
 		IncludeItemTypes([]api.BaseItemKind{api.BASEITEMKIND_MOVIE, api.BASEITEMKIND_EPISODE}).
@@ -86,9 +94,31 @@ func (c *Client) GetLeafItems(ctx context.Context, libraryID string) ([]MediaIte
 
 	var leaves []MediaItem
 	for _, item := range result.GetItems() {
-		leaves = append(leaves, c.enrichItem(item))
+		mi := c.enrichItem(item)
+		if pids, ok := seriesPIDs[mi.SeriesID]; ok {
+			mi.SeriesProviderIDs = pids
+		}
+		leaves = append(leaves, mi)
 	}
 	return leaves, nil
+}
+
+func (c *Client) getSeriesProviderIDs(ctx context.Context, libraryID string) (map[string]map[string]string, error) {
+	result, _, err := c.inner.ItemsAPI.GetItems(ctx).
+		ParentId(libraryID).
+		IncludeItemTypes([]api.BaseItemKind{api.BASEITEMKIND_SERIES}).
+		Recursive(true).
+		Fields([]api.ItemFields{api.ITEMFIELDS_PROVIDER_IDS}).
+		Execute()
+	if err != nil {
+		return nil, fmt.Errorf("GetItems(series in %s): %w", libraryID, err)
+	}
+
+	out := make(map[string]map[string]string, len(result.GetItems()))
+	for _, s := range result.GetItems() {
+		out[s.GetId()] = normalizeProviderIDs(s.GetProviderIds())
+	}
+	return out, nil
 }
 
 func (c *Client) GetItem(ctx context.Context, itemID string) (MediaItem, error) {
