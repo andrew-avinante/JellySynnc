@@ -157,6 +157,28 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 
 		winner := s.pickWinner(candidates)
 
+		// Cross-PID coverage check: an item is registered in candidateMap once per
+		// ProviderID. If ANY of the winner's other PIDs already match the target,
+		// the item is on the target — skip even though this specific iteration's PID missed.
+		covered := false
+		for k, v := range winner.Item.ProviderIDs {
+			pk := k + ":" + v
+			if pk == key.ProviderKey {
+				continue
+			}
+			if _, exists := targetCoverage[candidateKey{ProviderKey: pk, Resolution: key.Resolution}]; exists {
+				covered = true
+				break
+			}
+			if _, exists := targetProviderKeys[pk]; exists && !multiResolution[key.ProviderKey] {
+				covered = true
+				break
+			}
+		}
+		if covered {
+			continue
+		}
+
 		var resolutionSuffix string
 		if multiResolution[key.ProviderKey] {
 			resolutionSuffix = key.Resolution
@@ -223,6 +245,7 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 	// Step 6: Removal pass — use provider IDs from the already-fetched candidateMap
 	// so we avoid N extra API calls and use stable cross-server IDs.
 	remoteCurrentKeys := make(map[string]map[string]struct{})
+	remoteCurrentJellyfinIDs := make(map[string]map[string]struct{})
 	for key, candidates := range candidateMap {
 		for _, c := range candidates {
 			rid := c.Remote.GetID()
@@ -230,6 +253,10 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 				remoteCurrentKeys[rid] = make(map[string]struct{})
 			}
 			remoteCurrentKeys[rid][key.ProviderKey] = struct{}{}
+			if remoteCurrentJellyfinIDs[rid] == nil {
+				remoteCurrentJellyfinIDs[rid] = make(map[string]struct{})
+			}
+			remoteCurrentJellyfinIDs[rid][c.Item.JellyfinID] = struct{}{}
 		}
 	}
 
@@ -248,6 +275,16 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 			if _, found := currentKeys[k+":"+v]; found {
 				stillExists = true
 				break
+			}
+		}
+		// Fallback: provider keys may have changed (e.g. synthetic → real IDs after
+		// Jellyfin scans). If the Jellyfin item ID still exists on the remote the
+		// item is still present — don't remove it.
+		if !stillExists {
+			if jellyfinIDs, ok := remoteCurrentJellyfinIDs[row.RemoteID]; ok {
+				if _, found := jellyfinIDs[row.JellyfinItemID]; found {
+					stillExists = true
+				}
 			}
 		}
 		if !stillExists {
@@ -338,16 +375,15 @@ func (s *Syncer) buildCandidateMap(ctx context.Context) (map[candidateKey][]cand
 						)
 						continue
 					}
-					// Synthetic key so items with no provider IDs still enter the
-					// candidate map. Uses remote+jellyfin ID since provider IDs are absent.
-					pk := "jellyfin:" + remote.GetID() + ":" + item.JellyfinID
-					key := candidateKey{ProviderKey: pk, Resolution: item.Resolution}
-					candidateMap[key] = append(candidateMap[key], candidate{
-						Remote:         remote,
-						Item:           item,
-						LibraryMapping: mapping,
-					})
-					continue
+					// Inject synthetic provider ID so the item is tracked in the DB
+					// and resolves consistently across runs. Uses "jellyfin_<remoteID>"
+					// as key (no colons; remote IDs are UUIDs) so pk reconstruction
+					// via k+":"+v produces a stable, unique value.
+					// If Jellyfin later finds real provider IDs, the JellyfinItemID
+					// fallback in the removal pass prevents false deletion.
+					item.ProviderIDs = map[string]string{
+						"jellyfin_" + remote.GetID(): item.JellyfinID,
+					}
 				}
 				for k, v := range item.ProviderIDs {
 					pk := k + ":" + v
