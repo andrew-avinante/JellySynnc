@@ -1,0 +1,53 @@
+# Local Jellyfin server that will receive .strm files
+target:
+  name: "Home"
+  url: "http://localhost:8096"
+  api_key: "your-local-api-key"
+
+# SQLite database path (default: JellySynnc.db)
+db_path: /var/lib/JellySynnc/JellySynnc.db
+
+# How often to poll when running in listen mode (default: 15m)
+poll_interval: 30m
+
+# Remote Jellyfin servers to sync from
+remotes:
+  - id: "remote-a"
+    name: "Friend's Server"
+    api_url: "https://jellyfin.friend.example.com"
+    api_key: "remote-api-key"
+
+    # Base URL written inside .strm files. Must be reachable from the
+    # machine running Jellyfin (can differ from api_url).
+    strm_url: "https://jellyfin.friend.example.com"
+
+    # Filesystem path prefix on the remote where media files live.
+    # JellySynnc strips this when building relative paths.
+    root_start: "/media"
+
+    # Map each remote library to a local directory where .strm files will be written
+    library_mappings:
+      - remote_name: "Movies"
+        local_path: "/media/strm/Movies"
+      - remote_name: "TV Shows"
+        local_path: "/media/strm/TV Shows"
+        # Sync items that have no IMDB/TVDB/TMDB IDs (default: false)
+        sync_unknown_provider_ids: true
+
+  - id: "remote-b"
+    name: "Second Server"
+    api_url: "http://192.168.1.50:8096"
+    api_key: "another-api-key"
+    strm_url: "http://192.168.1.50:8096"
+    root_start: "/srv/media"
+    library_mappings:
+      - remote_name: "Movies"
+        local_path: "/media/strm/Movies"
+
+# When the same item is available from multiple remotes, these rules pick the winner.
+# Rules are evaluated in order; first match wins. Falls back to config order.
+tie_breaker_fields:
+  - field: "encoding"
+    value: "h265"
+  - field: "resolution"
+    value: "4K"
