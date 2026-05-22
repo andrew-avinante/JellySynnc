@@ -14,45 +14,43 @@ const episodeType = "Episode"
 // over target items.
 type TargetIndex struct {
 	coverage     coverageSet
-	providerKeys providerKeySet
+	providerKeys stringSet
 	resolutions  resolutionIndex
-	episodes     episodeSet
+	episodes     stringSet
 }
 
 func NewTargetIndex() *TargetIndex {
 	return &TargetIndex{
 		coverage:     newCoverageSet(),
-		providerKeys: newProviderKeySet(),
+		providerKeys: newStringSet(),
 		resolutions:  newResolutionIndex(),
-		episodes:     newEpisodeSet(),
+		episodes:     newStringSet(),
 	}
 }
 
 func (t *TargetIndex) Add(item jellyfin.MediaItem) {
 	for k, v := range item.ProviderIDs {
 		pk := providerKey(k, v)
-		t.coverage[candidateKey{ProviderKey: pk, Resolution: item.Resolution}] = emptyStruct()
-		t.providerKeys[pk] = emptyStruct()
+		t.coverage.add(candidateKey{ProviderKey: pk, Resolution: item.Resolution})
+		t.providerKeys.add(pk)
 		if t.resolutions[pk] == nil {
-			t.resolutions[pk] = newResolutionSet()
+			t.resolutions[pk] = newStringSet()
 		}
-		t.resolutions[pk][item.Resolution] = emptyStruct()
+		t.resolutions[pk].add(item.Resolution)
 	}
 	if item.Type == episodeType && item.SeasonNumber > 0 && item.EpisodeNumber > 0 {
 		for k, v := range item.SeriesProviderIDs {
-			t.episodes[fmt.Sprintf("%s:%d:%d", providerKey(k, v), item.SeasonNumber, item.EpisodeNumber)] = emptyStruct()
+			t.episodes.add(episodeKey(providerKey(k, v), item.SeasonNumber, item.EpisodeNumber))
 		}
 	}
 }
 
 func (t *TargetIndex) Has(key candidateKey) bool {
-	_, ok := t.coverage[key]
-	return ok
+	return t.coverage.has(key)
 }
 
 func (t *TargetIndex) HasProviderKey(pk string) bool {
-	_, ok := t.providerKeys[pk]
-	return ok
+	return t.providerKeys.has(pk)
 }
 
 // Resolutions returns the providerKey → resolution set map for the target.
@@ -62,10 +60,49 @@ func (t *TargetIndex) Resolutions() resolutionIndex {
 }
 
 func (t *TargetIndex) HasEpisode(seriesPK string, season, episode int) bool {
-	_, ok := t.episodes[fmt.Sprintf("%s:%d:%d", seriesPK, season, episode)]
-	return ok
+	return t.episodes.has(episodeKey(seriesPK, season, episode))
 }
 
-func emptyStruct() struct{} {
-	return struct{}{}
+// covers reports whether item (the winning candidate for key) is already present
+// on the target, so the write pass can skip it. It checks, in order:
+//   - an exact (providerKey, resolution) match;
+//   - a provider-key-only match when the item is not multi-resolution;
+//   - the same two checks across the item's OTHER provider IDs (cross-PID), since
+//     an item is registered once per provider ID and any of them may match;
+//   - an episode-number fallback keyed by (series PID, season, episode) for
+//     Episode items whose episode-level PIDs disagree across servers (e.g. TVDB
+//     renumbering).
+func (t *TargetIndex) covers(key candidateKey, item jellyfin.MediaItem, multiRes multiResolutionSet) bool {
+	if t.Has(key) {
+		return true
+	}
+	if t.HasProviderKey(key.ProviderKey) && !multiRes[key.ProviderKey] {
+		return true
+	}
+	for k, v := range item.ProviderIDs {
+		pk := providerKey(k, v)
+		if pk == key.ProviderKey {
+			continue
+		}
+		if t.Has(candidateKey{ProviderKey: pk, Resolution: key.Resolution}) {
+			return true
+		}
+		if t.HasProviderKey(pk) && !multiRes[key.ProviderKey] {
+			return true
+		}
+	}
+	if item.Type == episodeType && item.SeasonNumber > 0 && item.EpisodeNumber > 0 {
+		for k, v := range item.SeriesProviderIDs {
+			if t.HasEpisode(providerKey(k, v), item.SeasonNumber, item.EpisodeNumber) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// episodeKey builds the composite "seriesPK:season:episode" key used for the
+// episode-number fallback match.
+func episodeKey(seriesPK string, season, episode int) string {
+	return fmt.Sprintf("%s:%d:%d", seriesPK, season, episode)
 }
