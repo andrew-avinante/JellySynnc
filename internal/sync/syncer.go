@@ -44,6 +44,8 @@ type Syncer struct {
 	remotes map[string]*jellyfin.Client
 }
 
+// New constructs a Syncer from the given config and database handle, initialising
+// one Jellyfin client per configured remote and one for the target server.
 func New(cfg *config.Config, db *sqlx.DB) *Syncer {
 	remotes := make(map[string]*jellyfin.Client, len(cfg.GetRemotes()))
 	for _, r := range cfg.GetRemotes() {
@@ -57,6 +59,11 @@ func New(cfg *config.Config, db *sqlx.DB) *Syncer {
 	}
 }
 
+// Run executes a full sync cycle: it builds coverage maps for the target server,
+// fetches all items from every configured remote, writes missing .strm files, and
+// removes .strm files whose source items have disappeared from their remote.
+// A sync-run record is inserted at the start and finalised (with status and counts)
+// on return, even when an error occurs.
 func (s *Syncer) Run(ctx context.Context) (retErr error) {
 	slog.Info("sync started")
 	runID := uuid.New().String()
@@ -330,15 +337,17 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 	return nil
 }
 
+// buildTargetMaps fetches every leaf item from every library on the target server
+// and returns a CoverageMap, IdentityMap, and EpisodeFallbackMap.
 func (s *Syncer) buildTargetMaps(ctx context.Context) (
-	map[candidateKey]struct{},
-	map[string]map[string]struct{},
-	map[episodeFallbackKey]struct{},
+	CoverageMap,
+	IdentityMap,
+	EpisodeFallbackMap,
 	error,
 ) {
-	coverage := make(map[candidateKey]struct{})
-	identities := make(map[string]map[string]struct{})
-	episodeFallback := make(map[episodeFallbackKey]struct{})
+	coverage := NewCoverageMap()
+	identities := NewIdentityMap()
+	episodeFallback := NewEpisodeFallbackMap()
 
 	libs, err := s.target.GetLibraries(ctx)
 	if err != nil {
@@ -377,6 +386,11 @@ func (s *Syncer) buildTargetMaps(ctx context.Context) (
 	return coverage, identities, episodeFallback, nil
 }
 
+// buildCandidateMap fetches all leaf items from every configured remote and indexes
+// them by (providerKey, resolution). Items without provider IDs are either skipped
+// or assigned a synthetic "jellyfin_<remoteID>" ID when sync_unknown_provider_ids
+// is enabled for the library mapping. Each map entry holds all remote candidates
+// that share the same key so pickWinner can choose between them.
 func (s *Syncer) buildCandidateMap(ctx context.Context) (map[candidateKey][]candidate, error) {
 	candidateMap := make(map[candidateKey][]candidate)
 
@@ -444,6 +458,10 @@ func (s *Syncer) buildCandidateMap(ctx context.Context) (map[candidateKey][]cand
 	return candidateMap, nil
 }
 
+// pickWinner selects the preferred candidate from a slice that share the same
+// provider key and resolution. Tie-breaker fields from the config are evaluated
+// in order; the first candidate whose field value matches is returned. If no
+// tie-breaker matches, the first candidate in the slice is used.
 func (s *Syncer) pickWinner(candidates []candidate) candidate {
 	for _, tb := range s.cfg.GetTieBreakerFields() {
 		for _, c := range candidates {
@@ -476,6 +494,8 @@ func findExistingLocalPath(providerKey string, itemProviderIDs map[string]string
 	return ""
 }
 
+// marshalProviderIDs serialises a provider-ID map to its JSON string representation
+// for storage in the database.
 func marshalProviderIDs(ids map[string]string) (string, error) {
 	data, err := json.Marshal(ids)
 	return string(data), err
