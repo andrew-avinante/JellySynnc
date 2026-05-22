@@ -70,6 +70,10 @@ func (c *Client) GetLibraries(ctx context.Context) ([]Library, error) {
 	return libs, nil
 }
 
+// GetLeafItems returns a flat slice of every Movie and Episode in the given library via a
+// single recursive API call. Items with multiple media sources (e.g. a 1080p and 4K version
+// of the same file) produce one MediaItem per source, so the slice may contain more entries
+// than there are Jellyfin items.
 func (c *Client) GetLeafItems(ctx context.Context, libraryID string) ([]MediaItem, error) {
 	// Fetch series provider IDs first so we can attach them to episodes for
 	// (series, season, episode) fallback matching when episode-level PIDs disagree.
@@ -94,11 +98,13 @@ func (c *Client) GetLeafItems(ctx context.Context, libraryID string) ([]MediaIte
 
 	var leaves []MediaItem
 	for _, item := range result.GetItems() {
-		mi := c.enrichItem(item)
-		if pids, ok := seriesPIDs[mi.SeriesID]; ok {
-			mi.SeriesProviderIDs = pids
+		mediaItems := c.enrichItem(item)
+		for i := range mediaItems {
+			if pids, ok := seriesPIDs[mediaItems[i].SeriesID]; ok {
+				mediaItems[i].SeriesProviderIDs = pids
+			}
 		}
-		leaves = append(leaves, mi)
+		leaves = append(leaves, mediaItems...)
 	}
 	return leaves, nil
 }
@@ -121,7 +127,7 @@ func (c *Client) getSeriesProviderIDs(ctx context.Context, libraryID string) (ma
 	return out, nil
 }
 
-func (c *Client) GetItem(ctx context.Context, itemID string) (MediaItem, error) {
+func (c *Client) GetItem(ctx context.Context, itemID string) ([]MediaItem, error) {
 	result, _, err := c.inner.ItemsAPI.GetItems(ctx).
 		Ids([]string{itemID}).
 		Fields([]api.ItemFields{
@@ -131,19 +137,19 @@ func (c *Client) GetItem(ctx context.Context, itemID string) (MediaItem, error) 
 		}).
 		Execute()
 	if err != nil {
-		return MediaItem{}, fmt.Errorf("GetItems(id=%s): %w", itemID, err)
+		return nil, fmt.Errorf("GetItems(id=%s): %w", itemID, err)
 	}
 
 	items := result.GetItems()
 	if len(items) == 0 {
-		return MediaItem{}, ErrItemNotFound
+		return nil, ErrItemNotFound
 	}
 
 	return c.enrichItem(items[0]), nil
 }
 
-func (c *Client) enrichItem(item api.BaseItemDto) MediaItem {
-	mi := MediaItem{
+func (c *Client) enrichItem(item api.BaseItemDto) []MediaItem {
+	base := MediaItem{
 		JellyfinID:    item.GetId(),
 		Name:          item.GetName(),
 		Type:          string(item.GetType()),
@@ -156,30 +162,27 @@ func (c *Client) enrichItem(item api.BaseItemDto) MediaItem {
 
 	sources := item.GetMediaSources()
 	if len(sources) == 0 {
-		mi.Resolution = "unknown"
-		mi.Encoding = "unknown"
-		return mi
+		base.Resolution = "unknown"
+		base.Encoding = "unknown"
+		return []MediaItem{base}
 	}
 
-	src := sources[0]
-	mi.FilePath = src.GetPath()
-
-	for _, stream := range src.GetMediaStreams() {
-		if stream.GetType() == api.MEDIASTREAMTYPE_VIDEO {
-			mi.Resolution = normalizeResolution(stream.GetHeight())
-			mi.Encoding = normalizeEncoding(stream.GetCodec())
-			break
+	mediaItems := make([]MediaItem, 0, len(sources))
+	for _, src := range sources {
+		mediaItem := base
+		mediaItem.FilePath = src.GetPath()
+		mediaItem.Resolution = "unknown"
+		mediaItem.Encoding = "unknown"
+		for _, stream := range src.GetMediaStreams() {
+			if stream.GetType() == api.MEDIASTREAMTYPE_VIDEO {
+				mediaItem.Resolution = normalizeResolution(stream.GetHeight())
+				mediaItem.Encoding = normalizeEncoding(stream.GetCodec())
+				break
+			}
 		}
+		mediaItems = append(mediaItems, mediaItem)
 	}
-
-	if mi.Resolution == "" {
-		mi.Resolution = "unknown"
-	}
-	if mi.Encoding == "" {
-		mi.Encoding = "unknown"
-	}
-
-	return mi
+	return mediaItems
 }
 
 func normalizeProviderIDs(ids map[string]string) map[string]string {

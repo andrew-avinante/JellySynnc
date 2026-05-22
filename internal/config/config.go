@@ -14,6 +14,8 @@ type Config struct {
 	PollInterval     string         `mapstructure:"poll_interval"`
 	WebhookPort      int            `mapstructure:"webhook_port"`
 	DBPath           string         `mapstructure:"db_path"`
+	DebugTitles      []string       `mapstructure:"debug_titles"`
+	DebugOutputPath  string         `mapstructure:"debug_output_path"`
 }
 
 func (c *Config) Validate() error {
@@ -71,6 +73,20 @@ func (c *Config) GetDBPath() string {
 	return c.DBPath
 }
 
+func (c *Config) GetDebugTitles() []string {
+	if c == nil {
+		return nil
+	}
+	return c.DebugTitles
+}
+
+func (c *Config) GetDebugOutputPath() string {
+	if c == nil {
+		return ""
+	}
+	return c.DebugOutputPath
+}
+
 func Load(cfgFile string) (*Config, error) {
 	v := viper.New()
 	v.SetEnvPrefix("JellySynnc")
@@ -79,6 +95,7 @@ func Load(cfgFile string) (*Config, error) {
 	v.SetDefault("poll_interval", "15m")
 	v.SetDefault("webhook_port", 8080)
 	v.SetDefault("db_path", "JellySynnc.db")
+	v.SetDefault("debug_output_path", "JellySynnc-debug.json")
 
 	if cfgFile != "" {
 		v.SetConfigFile(cfgFile)

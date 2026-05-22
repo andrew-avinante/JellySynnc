@@ -51,3 +51,15 @@ tie_breaker_fields:
     value: "h265"
   - field: "resolution"
     value: "4K"
+
+# Debugging: titles to trace. When set, every sync run dumps the matching items'
+# media info (provider IDs, resolution, encoding, season/episode) from the target
+# and all remotes to a JSON file, along with the computed match keys and the target
+# coverage verdict. Use this to see why an item that already exists keeps syncing.
+# Matching is case-insensitive substring against the item name. Leave empty/omit
+# to disable.
+# debug_titles:
+#   - "The Matrix"
+#   - "Breaking Bad"
+# Where the debug report is written (default: JellySynnc-debug.json)
+# debug_output_path: "JellySynnc-debug.json"
