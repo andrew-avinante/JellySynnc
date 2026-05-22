@@ -102,24 +102,30 @@ func (t *TargetIndex) covers(key candidateKey, item jellyfin.MediaItem, multiRes
 // check passed (or "no match"), so a debug dump shows exactly why an item was or
 // wasn't treated as already present.
 func (t *TargetIndex) coverWhy(key candidateKey, item jellyfin.MediaItem, multiRes multiResolutionSet) (bool, string) {
+	// Strongest match: same provider ID and same resolution already on target.
 	if t.Has(key) {
 		return true, "exact (providerKey, resolution) match"
 	}
+	// Provider ID exists on target with no resolution variants — treat any resolution as covered.
 	if t.HasProviderKey(key.ProviderKey) && !multiRes[key.ProviderKey] {
 		return true, "providerKey match (single resolution)"
 	}
+	// Cross-PID: the source item has additional provider IDs (e.g. TMDB and TVDB both present).
+	// If any alternate PID already covers this item on the target, it counts.
 	for k, v := range item.ProviderIDs {
 		pk := providerKey(k, v)
-		if pk == key.ProviderKey {
-			continue
-		}
+
+		// Alternate PID matched with same resolution.
 		if t.Has(candidateKey{ProviderKey: pk, Resolution: key.Resolution}) {
 			return true, "cross-PID exact match on " + pk
 		}
+		// Alternate PID present on target with no resolution variants.
 		if t.HasProviderKey(pk) && !multiRes[key.ProviderKey] {
 			return true, "cross-PID providerKey match on " + pk
 		}
 	}
+	// Episode S/E fallback: episode-level PIDs may differ across servers (re-numbered
+	// specials, split episodes), so match by (series PID, season, episode number) instead.
 	if item.Type == episodeType && item.SeasonNumber > 0 && item.EpisodeNumber > 0 {
 		for k, v := range item.SeriesProviderIDs {
 			if t.HasEpisode(providerKey(k, v), item.SeasonNumber, item.EpisodeNumber) {
@@ -127,6 +133,9 @@ func (t *TargetIndex) coverWhy(key candidateKey, item jellyfin.MediaItem, multiR
 			}
 		}
 	}
+	// Name fallback: last resort when no numeric identifier matches.
+	// For episodes, require the name to match within the same series (guards against
+	// identically-named episodes in different series). For everything else, exact title match.
 	if item.Type == episodeType {
 		for k, v := range item.SeriesProviderIDs {
 			pk := providerKey(k, v)
