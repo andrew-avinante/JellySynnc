@@ -347,8 +347,8 @@ func (s *Syncer) buildTargetIndex(ctx context.Context) (*TargetIndex, error) {
 // or assigned a synthetic "jellyfin_<remoteID>" ID when sync_unknown_provider_ids
 // is enabled for the library mapping. Each map entry holds all remote candidates
 // that share the same key so pickWinner can choose between them.
-func (s *Syncer) buildCandidateMap(ctx context.Context) (map[candidateKey][]candidate, error) {
-	candidateMap := make(map[candidateKey][]candidate)
+func (s *Syncer) buildCandidateMap(ctx context.Context) (candidateMap, error) {
+	out := newCandidateMap()
 
 	for _, remote := range s.cfg.GetRemotes() {
 		client := s.remotes[remote.GetID()]
@@ -358,13 +358,10 @@ func (s *Syncer) buildCandidateMap(ctx context.Context) (map[candidateKey][]cand
 			continue
 		}
 
-		libByName := make(map[string]string)
-		for _, lib := range libs {
-			libByName[strings.ToLower(lib.Name)] = lib.ID
-		}
+		libIndex := buildLibraryIndex(libs)
 
 		for _, mapping := range remote.GetLibraryMappings() {
-			libID, ok := libByName[strings.ToLower(mapping.GetRemoteName())]
+			libID, ok := libIndex[strings.ToLower(mapping.GetRemoteName())]
 			if !ok {
 				slog.Warn("library not found on remote", "library", mapping.GetRemoteName(), "remote_id", remote.GetID())
 				continue
@@ -378,40 +375,12 @@ func (s *Syncer) buildCandidateMap(ctx context.Context) (map[candidateKey][]cand
 			}
 
 			for _, item := range items {
-				if len(item.ProviderIDs) == 0 {
-					if !mapping.GetSyncUnknownProviderIDs() {
-						slog.Warn("skipping item with no provider IDs",
-							"name", item.Name,
-							"library", mapping.GetRemoteName(),
-							"remote_id", remote.GetID(),
-							"hint", "set sync_unknown_provider_ids: true in library mapping to sync anyway",
-						)
-						continue
-					}
-					// Inject synthetic provider ID so the item is tracked in the DB
-					// and resolves consistently across runs. Uses "jellyfin_<remoteID>"
-					// as key (no colons; remote IDs are UUIDs) so pk reconstruction
-					// via k+":"+v produces a stable, unique value.
-					// If Jellyfin later finds real provider IDs, the JellyfinItemID
-					// fallback in the removal pass prevents false deletion.
-					item.ProviderIDs = map[string]string{
-						"jellyfin_" + remote.GetID(): item.JellyfinID,
-					}
-				}
-				for k, v := range item.ProviderIDs {
-					pk := providerKey(k, v)
-					key := candidateKey{ProviderKey: pk, Resolution: item.Resolution}
-					candidateMap[key] = append(candidateMap[key], candidate{
-						Remote:         remote,
-						Item:           item,
-						LibraryMapping: mapping,
-					})
-				}
+				out.add(item, remote, mapping)
 			}
 		}
 	}
 
-	return candidateMap, nil
+	return out, nil
 }
 
 // pickWinner selects the preferred candidate from a slice that share the same
@@ -460,4 +429,13 @@ func providerKey(k, v string) string {
 func marshalProviderIDs(ids map[string]string) (string, error) {
 	data, err := json.Marshal(ids)
 	return string(data), err
+}
+
+// buildLibraryIndex returns a case-insensitive name-to-ID map for a set of libraries.
+func buildLibraryIndex(libs []jellyfin.Library) map[string]string {
+	index := make(map[string]string, len(libs))
+	for _, lib := range libs {
+		index[strings.ToLower(lib.Name)] = lib.ID
+	}
+	return index
 }
