@@ -10,13 +10,15 @@ const episodeType = "Episode"
 
 // TargetIndex is a unified lookup structure for what already exists on the target server.
 // It supports coverage checks by (providerKey, resolution), provider-key-only checks,
-// resolution grouping, and episode S/E fallback matching — all built from a single pass
-// over target items.
+// resolution grouping, episode S/E fallback matching, and name-based fallback matching —
+// all built from a single pass over target items.
 type TargetIndex struct {
 	coverage     coverageSet
 	providerKeys stringSet
 	resolutions  resolutionIndex
 	episodes     stringSet
+	names        stringSet // exact item names for non-episode name fallback
+	episodeNames stringSet // "name\x00seriesPK" keys for episode name fallback
 }
 
 func NewTargetIndex() *TargetIndex {
@@ -25,6 +27,8 @@ func NewTargetIndex() *TargetIndex {
 		providerKeys: newStringSet(),
 		resolutions:  newResolutionIndex(),
 		episodes:     newStringSet(),
+		names:        newStringSet(),
+		episodeNames: newStringSet(),
 	}
 }
 
@@ -38,10 +42,16 @@ func (t *TargetIndex) Add(item jellyfin.MediaItem) {
 		}
 		t.resolutions[pk].add(item.Resolution)
 	}
-	if item.Type == episodeType && item.SeasonNumber > 0 && item.EpisodeNumber > 0 {
+	if item.Type == episodeType {
 		for k, v := range item.SeriesProviderIDs {
-			t.episodes.add(episodeKey(providerKey(k, v), item.SeasonNumber, item.EpisodeNumber))
+			spk := providerKey(k, v)
+			if item.SeasonNumber > 0 && item.EpisodeNumber > 0 {
+				t.episodes.add(episodeKey(spk, item.SeasonNumber, item.EpisodeNumber))
+			}
+			t.episodeNames.add(episodeNameKey(item.Name, spk))
 		}
+	} else {
+		t.names.add(item.Name)
 	}
 }
 
@@ -63,6 +73,14 @@ func (t *TargetIndex) HasEpisode(seriesPK string, season, episode int) bool {
 	return t.episodes.has(episodeKey(seriesPK, season, episode))
 }
 
+func (t *TargetIndex) HasName(name string) bool {
+	return t.names.has(name)
+}
+
+func (t *TargetIndex) HasEpisodeName(name, seriesPK string) bool {
+	return t.episodeNames.has(episodeNameKey(name, seriesPK))
+}
+
 // covers reports whether item (the winning candidate for key) is already present
 // on the target, so the write pass can skip it. It checks, in order:
 //   - an exact (providerKey, resolution) match;
@@ -70,14 +88,25 @@ func (t *TargetIndex) HasEpisode(seriesPK string, season, episode int) bool {
 //   - the same two checks across the item's OTHER provider IDs (cross-PID), since
 //     an item is registered once per provider ID and any of them may match;
 //   - an episode-number fallback keyed by (series PID, season, episode) for
-//     Episode items whose episode-level PIDs disagree across servers (e.g. TVDB
-//     renumbering).
+//     Episode items whose episode-level PIDs disagree across servers;
+//   - a name fallback: exact item name for non-episodes; exact name + at least one
+//     matching series provider ID for episodes (guards against same-name episodes
+//     across different series).
 func (t *TargetIndex) covers(key candidateKey, item jellyfin.MediaItem, multiRes multiResolutionSet) bool {
+	covered, _ := t.coverWhy(key, item, multiRes)
+	return covered
+}
+
+// coverWhy is covers with the matching reason exposed for the debug report. It is
+// the single source of truth; covers discards the reason. The reason names which
+// check passed (or "no match"), so a debug dump shows exactly why an item was or
+// wasn't treated as already present.
+func (t *TargetIndex) coverWhy(key candidateKey, item jellyfin.MediaItem, multiRes multiResolutionSet) (bool, string) {
 	if t.Has(key) {
-		return true
+		return true, "exact (providerKey, resolution) match"
 	}
 	if t.HasProviderKey(key.ProviderKey) && !multiRes[key.ProviderKey] {
-		return true
+		return true, "providerKey match (single resolution)"
 	}
 	for k, v := range item.ProviderIDs {
 		pk := providerKey(k, v)
@@ -85,24 +114,40 @@ func (t *TargetIndex) covers(key candidateKey, item jellyfin.MediaItem, multiRes
 			continue
 		}
 		if t.Has(candidateKey{ProviderKey: pk, Resolution: key.Resolution}) {
-			return true
+			return true, "cross-PID exact match on " + pk
 		}
 		if t.HasProviderKey(pk) && !multiRes[key.ProviderKey] {
-			return true
+			return true, "cross-PID providerKey match on " + pk
 		}
 	}
 	if item.Type == episodeType && item.SeasonNumber > 0 && item.EpisodeNumber > 0 {
 		for k, v := range item.SeriesProviderIDs {
 			if t.HasEpisode(providerKey(k, v), item.SeasonNumber, item.EpisodeNumber) {
-				return true
+				return true, "episode (series, season, episode) fallback match"
 			}
 		}
 	}
-	return false
+	if item.Type == episodeType {
+		for k, v := range item.SeriesProviderIDs {
+			pk := providerKey(k, v)
+			if t.HasEpisodeName(item.Name, pk) {
+				return true, "episode name + series PID match on " + pk
+			}
+		}
+	} else if t.HasName(item.Name) {
+		return true, "name match"
+	}
+	return false, "no match"
 }
 
 // episodeKey builds the composite "seriesPK:season:episode" key used for the
 // episode-number fallback match.
 func episodeKey(seriesPK string, season, episode int) string {
 	return fmt.Sprintf("%s:%d:%d", seriesPK, season, episode)
+}
+
+// episodeNameKey builds the composite key used for the episode name + series PID fallback.
+// Null byte separator ensures no collision between name and seriesPK components.
+func episodeNameKey(name, seriesPK string) string {
+	return name + "\x00" + seriesPK
 }

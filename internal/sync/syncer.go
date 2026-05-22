@@ -21,6 +21,7 @@ type Syncer struct {
 	db      *sqlx.DB
 	target  *jellyfin.Client
 	remotes map[string]*jellyfin.Client
+	debug   *debugCollector
 }
 
 // New constructs a Syncer from the given config and database handle, initialising
@@ -35,6 +36,7 @@ func New(cfg *config.Config, db *sqlx.DB) *Syncer {
 		db:      db,
 		target:  jellyfin.NewClient(cfg.GetTarget().GetURL(), cfg.GetTarget().GetAPIKey()),
 		remotes: remotes,
+		debug:   newDebugCollector(cfg.GetDebugTitles()),
 	}
 }
 
@@ -74,6 +76,10 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 
 	itemsAdded = s.writePass(candidateMap, targetIndex, multiResolution, synced)
 	itemsRemoved = s.removalPass(syncedItems, synced, candidateMap)
+
+	if err := s.debug.write(s.cfg.GetDebugOutputPath(), targetIndex, multiResolution); err != nil {
+		slog.Warn("writing debug report", "err", err)
+	}
 	return nil
 }
 
@@ -264,6 +270,7 @@ func (s *Syncer) buildTargetIndex(ctx context.Context) (*TargetIndex, error) {
 
 	for _, item := range mediaItems {
 		index.Add(item)
+		s.debug.addTarget(item)
 	}
 
 	return index, nil
@@ -302,6 +309,7 @@ func (s *Syncer) buildCandidateMap(ctx context.Context) (candidateMap, error) {
 			}
 
 			for _, item := range items {
+				s.debug.addRemote(remote.GetID(), item)
 				out.add(item, remote, mapping)
 			}
 		}
