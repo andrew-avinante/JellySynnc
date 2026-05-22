@@ -22,15 +22,6 @@ type candidateKey struct {
 	Resolution  string
 }
 
-// episodeFallbackKey identifies an episode by (series ProviderID, season, episode).
-// Used to match episodes across servers when episode-level ProviderIDs disagree
-// (e.g. TVDB renumbered episodes between scrapes) but series IDs + S/E align.
-type episodeFallbackKey struct {
-	SeriesProviderKey string
-	Season            int
-	Episode           int
-}
-
 type candidate struct {
 	Remote         config.RemoteConfig
 	Item           jellyfin.MediaItem
@@ -90,17 +81,10 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 		}
 	}()
 
-	// Step 1: Build target coverage maps
-	targetCoverage, targetIdentities, targetEpisodeFallback, err := s.buildTargetMaps(ctx)
+	// Step 1: Build target index
+	targetIndex, err := s.buildTargetIndex(ctx)
 	if err != nil {
-		return fmt.Errorf("building target maps: %w", err)
-	}
-
-	// Provider-key-only set: lets us detect items already on target even when
-	// Jellyfin can't probe .strm files and reports resolution as "unknown".
-	targetProviderKeys := make(map[string]struct{}, len(targetCoverage))
-	for key := range targetCoverage {
-		targetProviderKeys[key.ProviderKey] = struct{}{}
+		return fmt.Errorf("building target index: %w", err)
 	}
 
 	// Step 2: Load and decode existing synced items from DB once
@@ -122,7 +106,7 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 		decodedPIDs[item.ID] = pids
 		dir := filepath.Dir(item.StrmPath)
 		for k, v := range pids {
-			pk := k + ":" + v
+			pk := providerKey(k, v)
 			syncedMap[candidateKey{ProviderKey: pk, Resolution: item.Resolution}] = item
 			providerKeyToDir[pk] = dir
 		}
@@ -142,7 +126,7 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 		}
 		resolutionsByProvider[key.ProviderKey][key.Resolution] = struct{}{}
 	}
-	for pk, resSet := range targetIdentities {
+	for pk, resSet := range targetIndex.Resolutions() {
 		if resolutionsByProvider[pk] == nil {
 			resolutionsByProvider[pk] = make(map[string]struct{})
 		}
@@ -162,12 +146,12 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 
 	// Step 5: Write pass
 	for key, candidates := range candidateMap {
-		if _, exists := targetCoverage[key]; exists {
+		if targetIndex.Has(key) {
 			continue
 		}
 		// Item exists on target but .strm reported unknown resolution — skip unless
 		// there are genuinely multiple resolutions from remotes that need separate files.
-		if _, exists := targetProviderKeys[key.ProviderKey]; exists && !multiResolution[key.ProviderKey] {
+		if targetIndex.HasProviderKey(key.ProviderKey) && !multiResolution[key.ProviderKey] {
 			continue
 		}
 
@@ -178,15 +162,15 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 		// the item is on the target — skip even though this specific iteration's PID missed.
 		covered := false
 		for k, v := range winner.Item.ProviderIDs {
-			pk := k + ":" + v
+			pk := providerKey(k, v)
 			if pk == key.ProviderKey {
 				continue
 			}
-			if _, exists := targetCoverage[candidateKey{ProviderKey: pk, Resolution: key.Resolution}]; exists {
+			if targetIndex.Has(candidateKey{ProviderKey: pk, Resolution: key.Resolution}) {
 				covered = true
 				break
 			}
-			if _, exists := targetProviderKeys[pk]; exists && !multiResolution[key.ProviderKey] {
+			if targetIndex.HasProviderKey(pk) && !multiResolution[key.ProviderKey] {
 				covered = true
 				break
 			}
@@ -196,13 +180,7 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 		// PIDs disagree between servers (e.g. TVDB renumbering). Only for Episode items.
 		if !covered && winner.Item.Type == "Episode" && winner.Item.SeasonNumber > 0 && winner.Item.EpisodeNumber > 0 {
 			for k, v := range winner.Item.SeriesProviderIDs {
-				spk := k + ":" + v
-				fk := episodeFallbackKey{
-					SeriesProviderKey: spk,
-					Season:            winner.Item.SeasonNumber,
-					Episode:           winner.Item.EpisodeNumber,
-				}
-				if _, exists := targetEpisodeFallback[fk]; exists {
+				if targetIndex.HasEpisode(providerKey(k, v), winner.Item.SeasonNumber, winner.Item.EpisodeNumber) {
 					covered = true
 					break
 				}
@@ -337,53 +315,31 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 	return nil
 }
 
-// buildTargetMaps fetches every leaf item from every library on the target server
-// and returns a CoverageMap, IdentityMap, and EpisodeFallbackMap.
-func (s *Syncer) buildTargetMaps(ctx context.Context) (
-	CoverageMap,
-	IdentityMap,
-	EpisodeFallbackMap,
-	error,
-) {
-	coverage := NewCoverageMap()
-	identities := NewIdentityMap()
-	episodeFallback := NewEpisodeFallbackMap()
+// buildTargetIndex fetches every leaf item from every library on the target server
+// and returns a TargetIndex for coverage lookups during the sync write and removal passes.
+func (s *Syncer) buildTargetIndex(ctx context.Context) (*TargetIndex, error) {
+	index := NewTargetIndex()
 
 	libs, err := s.target.GetLibraries(ctx)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("getting target libraries: %w", err)
+		return nil, fmt.Errorf("getting target libraries: %w", err)
 	}
 
+	var mediaItems []jellyfin.MediaItem
 	for _, lib := range libs {
 		items, err := s.target.GetLeafItems(ctx, lib.ID)
 		if err != nil {
 			slog.Warn("getting target items", "library", lib.Name, "err", err)
 			continue
 		}
-		for _, item := range items {
-			for k, v := range item.ProviderIDs {
-				pk := k + ":" + v
-				key := candidateKey{ProviderKey: pk, Resolution: item.Resolution}
-				coverage[key] = struct{}{}
-				if identities[pk] == nil {
-					identities[pk] = make(map[string]struct{})
-				}
-				identities[pk][item.Resolution] = struct{}{}
-			}
-			if item.Type == "Episode" && item.SeasonNumber > 0 && item.EpisodeNumber > 0 {
-				for k, v := range item.SeriesProviderIDs {
-					spk := k + ":" + v
-					episodeFallback[episodeFallbackKey{
-						SeriesProviderKey: spk,
-						Season:            item.SeasonNumber,
-						Episode:           item.EpisodeNumber,
-					}] = struct{}{}
-				}
-			}
-		}
+		mediaItems = append(mediaItems, items...)
 	}
 
-	return coverage, identities, episodeFallback, nil
+	for _, item := range mediaItems {
+		index.Add(item)
+	}
+
+	return index, nil
 }
 
 // buildCandidateMap fetches all leaf items from every configured remote and indexes
@@ -443,7 +399,7 @@ func (s *Syncer) buildCandidateMap(ctx context.Context) (map[candidateKey][]cand
 					}
 				}
 				for k, v := range item.ProviderIDs {
-					pk := k + ":" + v
+					pk := providerKey(k, v)
 					key := candidateKey{ProviderKey: pk, Resolution: item.Resolution}
 					candidateMap[key] = append(candidateMap[key], candidate{
 						Remote:         remote,
@@ -482,16 +438,21 @@ func (s *Syncer) pickWinner(candidates []candidate) candidate {
 
 // findExistingLocalPath returns the directory of a previously synced strm for
 // this item so multi-resolution variants land alongside existing files.
-func findExistingLocalPath(providerKey string, itemProviderIDs map[string]string, providerKeyToDir map[string]string) string {
-	if dir, ok := providerKeyToDir[providerKey]; ok {
+func findExistingLocalPath(pk string, itemProviderIDs map[string]string, providerKeyToDir map[string]string) string {
+	if dir, ok := providerKeyToDir[pk]; ok {
 		return dir
 	}
 	for k, v := range itemProviderIDs {
-		if dir, ok := providerKeyToDir[k+":"+v]; ok {
+		if dir, ok := providerKeyToDir[providerKey(k, v)]; ok {
 			return dir
 		}
 	}
 	return ""
+}
+
+// providerKey builds the canonical "type:id" string used to key items by provider ID.
+func providerKey(k, v string) string {
+	return k + ":" + v
 }
 
 // marshalProviderIDs serialises a provider-ID map to its JSON string representation
