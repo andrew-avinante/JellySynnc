@@ -150,12 +150,17 @@ func (s *Syncer) finishRun(runID string, itemsAdded, itemsRemoved int, retErr er
 // cover, returning how many items were added or re-pointed to a new remote.
 func (s *Syncer) writePass(candidates candidateMap, target *TargetIndex, multiRes multiResolutionSet, synced syncedIndex) int {
 	itemsAdded := 0
+	// A single item carries several provider IDs, so the same item appears under
+	// multiple candidateKeys here. written tracks strm paths already handled this
+	// run so each physical file yields exactly one DB row (newSyncedIndex fans that
+	// one row back out across every provider key, so coverage is unaffected).
+	written := newStringSet()
 	for key, group := range candidates {
 		winner := s.pickWinner(group)
 		if target.covers(key, winner.Item, multiRes) {
 			continue
 		}
-		if s.writeWinner(key, winner, multiRes, synced) {
+		if s.writeWinner(key, winner, multiRes, synced, written) {
 			itemsAdded++
 		}
 	}
@@ -212,11 +217,15 @@ func (s *Syncer) deleteStale(stale []staleItem) int {
 // writeWinner writes the strm file for the chosen candidate and records it in the
 // DB, returning true when an item was added or re-pointed to a new remote. It is
 // only called for items the target doesn't already cover.
-func (s *Syncer) writeWinner(key candidateKey, winner candidate, multiRes multiResolutionSet, synced syncedIndex) bool {
+func (s *Syncer) writeWinner(key candidateKey, winner candidate, multiRes multiResolutionSet, synced syncedIndex, written stringSet) bool {
 	strmPath, strmContent, ok := s.resolveStrm(key, winner, multiRes, synced)
 	if !ok {
 		return false
 	}
+	if written.has(strmPath) {
+		return false // another provider key of this item already wrote this file
+	}
+	written.add(strmPath)
 	return s.persistWinner(key, winner, synced, strmPath, strmContent)
 }
 
