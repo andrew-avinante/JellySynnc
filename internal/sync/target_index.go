@@ -34,6 +34,9 @@ func NewTargetIndex() *TargetIndex {
 
 func (t *TargetIndex) Add(item jellyfin.MediaItem) {
 	for k, v := range item.ProviderIDs {
+		if isCollectionKey(k) {
+			continue
+		}
 		pk := providerKey(k, v)
 		t.coverage.add(candidateKey{ProviderKey: pk, Resolution: item.Resolution})
 		t.providerKeys.add(pk)
@@ -113,6 +116,9 @@ func (t *TargetIndex) coverWhy(key candidateKey, item jellyfin.MediaItem, multiR
 	// Cross-PID: the source item has additional provider IDs (e.g. TMDB and TVDB both present).
 	// If any alternate PID already covers this item on the target, it counts.
 	for k, v := range item.ProviderIDs {
+		if isCollectionKey(k) {
+			continue
+		}
 		pk := providerKey(k, v)
 
 		// Alternate PID matched with same resolution.
@@ -120,7 +126,7 @@ func (t *TargetIndex) coverWhy(key candidateKey, item jellyfin.MediaItem, multiR
 			return true, "cross-PID exact match on " + pk
 		}
 		// Alternate PID present on target with no resolution variants.
-		if t.HasProviderKey(pk) && !multiRes[key.ProviderKey] {
+		if t.HasProviderKey(pk) && !multiRes[pk] {
 			return true, "cross-PID providerKey match on " + pk
 		}
 	}

@@ -207,6 +207,9 @@ func (candidates candidateMap) add(item jellyfin.MediaItem, remote config.Remote
 		}
 	}
 	for k, v := range item.ProviderIDs {
+		if isCollectionKey(k) {
+			continue
+		}
 		key := candidateKey{ProviderKey: providerKey(k, v), Resolution: item.Resolution}
 		candidates[key] = append(candidates[key], candidate{Remote: remote, Item: item, LibraryMapping: mapping})
 	}

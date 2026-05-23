@@ -359,6 +359,14 @@ func providerKey(k, v string) string {
 	return k + ":" + v
 }
 
+// isCollectionKey reports whether a provider-ID key identifies a collection
+// (e.g. "tmdbcollection", "tvdbcollection") rather than a single item. Collection
+// IDs are shared by every movie in a franchise, so keying coverage or candidates
+// on them makes one synced movie falsely cover its still-missing siblings.
+func isCollectionKey(k string) bool {
+	return strings.HasSuffix(strings.ToLower(k), "collection")
+}
+
 // marshalProviderIDs serialises a provider-ID map to its JSON string representation
 // for storage in the database.
 func marshalProviderIDs(ids map[string]string) (string, error) {

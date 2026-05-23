@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/andrew-avinante/JellySynnc/internal/config"
@@ -203,6 +204,267 @@ func TestPickWinner(t *testing.T) {
 			got := s.pickWinner(tc.candidates)
 			if got.Remote.GetID() != tc.wantRemoteID {
 				t.Errorf("winner remote ID = %q, want %q", got.Remote.GetID(), tc.wantRemoteID)
+			}
+		})
+	}
+}
+
+// TestCollectionKeyExcludedFromIndexes verifies collection IDs never enter the
+// target coverage index or the candidate map. They identify a franchise, not a
+// single item, so keying on them would let one synced movie cover its siblings.
+func TestCollectionKeyExcludedFromIndexes(t *testing.T) {
+	target := NewTargetIndex()
+	target.Add(jellyfin.MediaItem{
+		Name: "Iron Man 3", Type: "Movie", Resolution: "1080p",
+		ProviderIDs: map[string]string{
+			"imdb": "tt1300854", "tmdb": "68721", "tmdbcollection": "131292",
+		},
+	})
+	if target.HasProviderKey("tmdbcollection:131292") {
+		t.Error("collection key must not be indexed in target coverage")
+	}
+	if !target.HasProviderKey("imdb:tt1300854") {
+		t.Error("real provider key should be indexed")
+	}
+
+	candidates := newCandidateMap()
+	candidates.add(jellyfin.MediaItem{
+		Name: "Iron Man", Type: "Movie", Resolution: "1080p",
+		ProviderIDs: map[string]string{
+			"imdb": "tt0371746", "tmdb": "1726", "tmdbcollection": "131292",
+		},
+	}, config.RemoteConfig{ID: "remote1"}, config.LibraryMapping{})
+	for key := range candidates {
+		if isCollectionKey(strings.SplitN(key.ProviderKey, ":", 2)[0]) {
+			t.Errorf("collection key %q must not be a candidate key", key.ProviderKey)
+		}
+	}
+}
+
+// TestCoverWhy_CollectionSiblingNotFalselyCovered is the core regression for the
+// over-coverage bug: a genuinely-absent movie that shares only a collection ID
+// with a different movie already on the target must NOT be treated as covered.
+// Iron Man (2008) shares collection 131292 with Iron Man 3 (on target) but has
+// distinct real IDs and a distinct name, so it must be flagged for sync.
+func TestCoverWhy_CollectionSiblingNotFalselyCovered(t *testing.T) {
+	target := NewTargetIndex()
+	target.Add(jellyfin.MediaItem{
+		Name: "Iron Man 3", Type: "Movie", Resolution: "1080p",
+		ProviderIDs: map[string]string{
+			"imdb": "tt1300854", "tmdb": "68721", "tmdbcollection": "131292",
+		},
+	})
+
+	ironMan := jellyfin.MediaItem{
+		Name: "Iron Man", Type: "Movie", Resolution: "1080p",
+		ProviderIDs: map[string]string{
+			"imdb": "tt0371746", "tmdb": "1726", "tmdbcollection": "131292",
+		},
+	}
+	candidates := newCandidateMap()
+	candidates.add(ironMan, config.RemoteConfig{ID: "remote1"}, config.LibraryMapping{})
+	multiRes := newMultiResolutionSet(candidates, target)
+
+	// Every non-collection candidate key for Iron Man must be uncovered.
+	for key := range candidates {
+		covered, reason := target.coverWhy(key, ironMan, multiRes)
+		if covered {
+			t.Errorf("key %q wrongly covered (reason %q); Iron Man is absent from target", key.ProviderKey, reason)
+		}
+	}
+}
+
+// TestCoverWhy_SharedRealIDsCoverViaCrossPID confirms exclusion of collection keys
+// does not break legitimate coverage: an item sharing a real ID with a target item
+// is still covered via cross-PID, independent of any collection ID.
+func TestCoverWhy_SharedRealIDsCoverViaCrossPID(t *testing.T) {
+	target := NewTargetIndex()
+	target.Add(jellyfin.MediaItem{
+		Name: "Avatar: The Way of Water", Type: "Movie", Resolution: "unknown",
+		ProviderIDs: map[string]string{
+			"imdb": "tt1630029", "tmdb": "76600", "tmdbcollection": "87096",
+			"tvdb": "5483", "tvdbslug": "avatar-the-way-of-water",
+		},
+	})
+
+	// The "Stunts" extra carries the real movie's imdb/tmdb IDs (plus its own tvdb).
+	stunts := jellyfin.MediaItem{
+		Name: "Avatar The way of water: Stunts", Type: "Movie", Resolution: "4K",
+		ProviderIDs: map[string]string{
+			"imdb": "tt1630029", "tmdb": "76600", "tmdbcollection": "87096",
+			"tvdb": "353309", "tvdbslug": "avatar-the-way-of-water-stunts",
+		},
+	}
+	candidates := newCandidateMap()
+	candidates.add(stunts, config.RemoteConfig{ID: "remote1"}, config.LibraryMapping{})
+	multiRes := newMultiResolutionSet(candidates, target)
+
+	// tvdb:353309 is absent from target but imdb:tt1630029 is present → cross-PID covers it.
+	covered, reason := target.coverWhy(
+		candidateKey{ProviderKey: "tvdb:353309", Resolution: "4K"}, stunts, multiRes)
+	if !covered {
+		t.Errorf("expected cross-PID coverage via real ID, got not covered (reason %q)", reason)
+	}
+}
+
+// TestCoverWhy_CrossPIDMultiResAlternateNotCovered verifies the flip side: when an
+// item's alternate provider ID is itself multi-resolution on the target, a
+// different-resolution candidate must NOT be treated as covered by a provider-key-only
+// cross-PID match. This guards the multiRes[pk] gate from over-matching.
+func TestCoverWhy_CrossPIDMultiResAlternateNotCovered(t *testing.T) {
+	target := NewTargetIndex()
+	target.Add(jellyfin.MediaItem{
+		Name: "Movie HD", Type: "Movie", Resolution: "1080p",
+		ProviderIDs: map[string]string{"imdb": "tt9999999"},
+	})
+	target.Add(jellyfin.MediaItem{
+		Name: "Movie UHD", Type: "Movie", Resolution: "4K",
+		ProviderIDs: map[string]string{"imdb": "tt9999999"},
+	})
+
+	candidate := jellyfin.MediaItem{
+		Name: "Movie SD", Type: "Movie", Resolution: "720p",
+		ProviderIDs: map[string]string{"imdb": "tt9999999", "tvdb": "424242"},
+	}
+	candidates := newCandidateMap()
+	candidates.add(candidate, config.RemoteConfig{ID: "remote1"}, config.LibraryMapping{})
+
+	multiRes := newMultiResolutionSet(candidates, target)
+	if !multiRes["imdb:tt9999999"] {
+		t.Fatal("expected imdb:tt9999999 to be multi-resolution")
+	}
+
+	// tvdb:424242 @720p is absent from target; its only target-present alt PID
+	// (imdb) is multi-resolution and has no 720p variant, so it must not match.
+	key := candidateKey{ProviderKey: "tvdb:424242", Resolution: "720p"}
+	covered, reason := target.coverWhy(key, candidate, multiRes)
+	if covered {
+		t.Errorf("covered = true (reason %q), want false: multi-res alternate PID must not over-match", reason)
+	}
+}
+
+// TestCoverWhy_AllBranches exercises every match branch of coverWhy with a focused
+// target setup per case, including the two "not covered" scenarios surfaced during
+// debugging: an unidentified target item (empty provider IDs + mangled name) and a
+// genuinely-absent item with no shared identity.
+func TestCoverWhy_AllBranches(t *testing.T) {
+	tests := []struct {
+		name           string
+		targetItems    []jellyfin.MediaItem
+		item           jellyfin.MediaItem
+		key            candidateKey
+		wantCovered    bool
+		wantReason     string // exact match when set
+		wantReasonPref string // prefix match when set
+	}{
+		{
+			name: "exact providerKey+resolution match",
+			targetItems: []jellyfin.MediaItem{
+				{Name: "Foo", Type: "Movie", Resolution: "1080p", ProviderIDs: map[string]string{"imdb": "tt1"}},
+			},
+			item:        jellyfin.MediaItem{Name: "Foo", Type: "Movie", Resolution: "1080p", ProviderIDs: map[string]string{"imdb": "tt1"}},
+			key:         candidateKey{ProviderKey: "imdb:tt1", Resolution: "1080p"},
+			wantCovered: true,
+			wantReason:  "exact (providerKey, resolution) match",
+		},
+		{
+			name: "providerKey match single resolution covers any resolution",
+			targetItems: []jellyfin.MediaItem{
+				{Name: "Foo", Type: "Movie", Resolution: "1080p", ProviderIDs: map[string]string{"imdb": "tt1"}},
+			},
+			item:        jellyfin.MediaItem{Name: "Foo", Type: "Movie", Resolution: "4K", ProviderIDs: map[string]string{"imdb": "tt1"}},
+			key:         candidateKey{ProviderKey: "imdb:tt1", Resolution: "4K"},
+			wantCovered: true,
+			wantReason:  "providerKey match (single resolution)",
+		},
+		{
+			name: "cross-PID exact match on alternate ID",
+			targetItems: []jellyfin.MediaItem{
+				{Name: "Foo", Type: "Movie", Resolution: "4K", ProviderIDs: map[string]string{"imdb": "tt1"}},
+			},
+			item:        jellyfin.MediaItem{Name: "Foo", Type: "Movie", Resolution: "4K", ProviderIDs: map[string]string{"imdb": "tt1", "tvdb": "99"}},
+			key:         candidateKey{ProviderKey: "tvdb:99", Resolution: "4K"},
+			wantCovered: true,
+			wantReason:  "cross-PID exact match on imdb:tt1",
+		},
+		{
+			name: "episode (series, season, episode) fallback when episode PIDs differ",
+			targetItems: []jellyfin.MediaItem{
+				{Name: "Ep A", Type: "Episode", Resolution: "1080p",
+					ProviderIDs:       map[string]string{"imdb": "epOLD"},
+					SeriesProviderIDs: map[string]string{"tvdb": "series1"},
+					SeasonNumber:      1, EpisodeNumber: 2},
+			},
+			item: jellyfin.MediaItem{Name: "Ep A renamed", Type: "Episode", Resolution: "1080p",
+				ProviderIDs:       map[string]string{"imdb": "epNEW"},
+				SeriesProviderIDs: map[string]string{"tvdb": "series1"},
+				SeasonNumber:      1, EpisodeNumber: 2},
+			key:         candidateKey{ProviderKey: "imdb:epNEW", Resolution: "1080p"},
+			wantCovered: true,
+			wantReason:  "episode (series, season, episode) fallback match",
+		},
+		{
+			name: "episode name + series PID fallback when numbers absent",
+			targetItems: []jellyfin.MediaItem{
+				{Name: "Special", Type: "Episode", Resolution: "1080p",
+					ProviderIDs:       map[string]string{"imdb": "epOLD"},
+					SeriesProviderIDs: map[string]string{"tvdb": "series1"}},
+			},
+			item: jellyfin.MediaItem{Name: "Special", Type: "Episode", Resolution: "1080p",
+				ProviderIDs:       map[string]string{"imdb": "epNEW"},
+				SeriesProviderIDs: map[string]string{"tvdb": "series1"}},
+			key:            candidateKey{ProviderKey: "imdb:epNEW", Resolution: "1080p"},
+			wantCovered:    true,
+			wantReasonPref: "episode name + series PID match on ",
+		},
+		{
+			name: "name match covers item unidentified on target (empty IDs, same name)",
+			targetItems: []jellyfin.MediaItem{
+				{Name: "Foo", Type: "Movie", Resolution: "unknown", ProviderIDs: map[string]string{}},
+			},
+			item:        jellyfin.MediaItem{Name: "Foo", Type: "Movie", Resolution: "1080p", ProviderIDs: map[string]string{"imdb": "tt1"}},
+			key:         candidateKey{ProviderKey: "imdb:tt1", Resolution: "1080p"},
+			wantCovered: true,
+			wantReason:  "name match",
+		},
+		{
+			name: "unidentified target item with mangled name is NOT covered (perpetual re-sync scenario)",
+			targetItems: []jellyfin.MediaItem{
+				{Name: "Foo Waifu2x", Type: "Movie", Resolution: "unknown", ProviderIDs: map[string]string{}},
+			},
+			item:        jellyfin.MediaItem{Name: "Foo", Type: "Movie", Resolution: "1080p", ProviderIDs: map[string]string{"imdb": "tt1"}},
+			key:         candidateKey{ProviderKey: "imdb:tt1", Resolution: "1080p"},
+			wantCovered: false,
+			wantReason:  "no match",
+		},
+		{
+			name: "genuinely absent item is NOT covered",
+			targetItems: []jellyfin.MediaItem{
+				{Name: "Other", Type: "Movie", Resolution: "1080p", ProviderIDs: map[string]string{"imdb": "ttOTHER"}},
+			},
+			item:        jellyfin.MediaItem{Name: "Foo", Type: "Movie", Resolution: "1080p", ProviderIDs: map[string]string{"imdb": "tt1"}},
+			key:         candidateKey{ProviderKey: "imdb:tt1", Resolution: "1080p"},
+			wantCovered: false,
+			wantReason:  "no match",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			target := NewTargetIndex()
+			for _, ti := range tc.targetItems {
+				target.Add(ti)
+			}
+			multiRes := newMultiResolutionSet(newCandidateMap(), target)
+			covered, reason := target.coverWhy(tc.key, tc.item, multiRes)
+			if covered != tc.wantCovered {
+				t.Errorf("covered = %v, want %v (reason %q)", covered, tc.wantCovered, reason)
+			}
+			if tc.wantReason != "" && reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tc.wantReason)
+			}
+			if tc.wantReasonPref != "" && !strings.HasPrefix(reason, tc.wantReasonPref) {
+				t.Errorf("reason = %q, want prefix %q", reason, tc.wantReasonPref)
 			}
 		})
 	}
@@ -647,5 +909,132 @@ func TestRun_Idempotent(t *testing.T) {
 	strmPath := filepath.Join(tmpDir, "Stable Movie", "movie.strm")
 	if _, err := os.Stat(strmPath); err != nil {
 		t.Errorf("strm file missing after 2 runs: %v", err)
+	}
+}
+
+// TestRun_WritesCollectionSibling is the end-to-end regression for the collection-ID
+// over-coverage bug. The target has Iron Man 3; the remote has a different movie
+// (Iron Man) that shares only the franchise collection ID. The sibling must still be
+// written, because a shared collection ID is not proof the item itself is present.
+func TestRun_WritesCollectionSibling(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	targetSrv := newJellyfinServer(t,
+		[]jfVirtualFolder{{ItemId: "tlib1", Name: "Movies", CollectionType: "movies"}},
+		map[string][]jfItem{
+			"tlib1": {{
+				Id:          "target-im3",
+				Name:        "Iron Man 3",
+				Type:        "Movie",
+				ProviderIds: map[string]string{"Tmdb": "68721", "TmdbCollection": "131292"},
+				MediaSources: []jfMediaSource{{
+					Path:         "/target/Movies/Iron Man 3/movie.strm",
+					MediaStreams: []jfMediaStream{{Type: "Video", Height: 1080, Codec: "hevc"}},
+				}},
+			}},
+		},
+	)
+
+	remoteSrv := newJellyfinServer(t,
+		[]jfVirtualFolder{{ItemId: "rlib1", Name: "Movies", CollectionType: "movies"}},
+		map[string][]jfItem{
+			"rlib1": {{
+				Id:          "remote-im1",
+				Name:        "Iron Man",
+				Type:        "Movie",
+				ProviderIds: map[string]string{"Tmdb": "1726", "TmdbCollection": "131292"},
+				MediaSources: []jfMediaSource{{
+					Path:         "/media/Movies/Iron Man (2008)/movie.mkv",
+					MediaStreams: []jfMediaStream{{Type: "Video", Height: 1080, Codec: "hevc"}},
+				}},
+			}},
+		},
+	)
+
+	database := setupTestDB(t)
+	cfg := &config.Config{
+		Target: config.TargetConfig{URL: targetSrv.URL, APIKey: "key"},
+		Remotes: []config.RemoteConfig{{
+			ID:              "remote1",
+			APIURL:          remoteSrv.URL,
+			StrmURL:         "http://stream.example.com",
+			APIKey:          "key",
+			RootStart:       "/media",
+			LibraryMappings: []config.LibraryMapping{{RemoteName: "Movies", LocalPath: tmpDir}},
+		}},
+	}
+
+	s := New(cfg, database)
+	if err := s.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	expectedStrm := filepath.Join(tmpDir, "Iron Man (2008)", "movie.strm")
+	if _, err := os.Stat(expectedStrm); err != nil {
+		t.Errorf("collection sibling not written at %q: %v", expectedStrm, err)
+	}
+}
+
+// TestRun_WritesUnidentifiedTargetItem covers the "perpetual re-sync" scenario found
+// during debugging: the target already has the file as a .strm but Jellyfin failed to
+// match it (empty provider IDs) and named it after the mangled filename. With no shared
+// provider ID and a non-matching name, the remote item is correctly treated as missing
+// and written.
+func TestRun_WritesUnidentifiedTargetItem(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	targetSrv := newJellyfinServer(t,
+		[]jfVirtualFolder{{ItemId: "tlib1", Name: "Movies", CollectionType: "movies"}},
+		map[string][]jfItem{
+			"tlib1": {{
+				Id:          "target-unmatched",
+				Name:        "Iron Man Waifu2x",
+				Type:        "Movie",
+				ProviderIds: map[string]string{}, // Jellyfin could not identify it
+				MediaSources: []jfMediaSource{{
+					Path:         "/target/Movies/Iron Man (2008)/Iron Man Waifu2x.strm",
+					MediaStreams: []jfMediaStream{{Type: "Video", Height: 0, Codec: ""}},
+				}},
+			}},
+		},
+	)
+
+	remoteSrv := newJellyfinServer(t,
+		[]jfVirtualFolder{{ItemId: "rlib1", Name: "Movies", CollectionType: "movies"}},
+		map[string][]jfItem{
+			"rlib1": {{
+				Id:          "remote-im1",
+				Name:        "Iron Man",
+				Type:        "Movie",
+				ProviderIds: map[string]string{"Tmdb": "1726", "Imdb": "tt0371746"},
+				MediaSources: []jfMediaSource{{
+					Path:         "/media/Movies/Iron Man (2008)/movie.mkv",
+					MediaStreams: []jfMediaStream{{Type: "Video", Height: 1080, Codec: "hevc"}},
+				}},
+			}},
+		},
+	)
+
+	database := setupTestDB(t)
+	cfg := &config.Config{
+		Target: config.TargetConfig{URL: targetSrv.URL, APIKey: "key"},
+		Remotes: []config.RemoteConfig{{
+			ID:              "remote1",
+			APIURL:          remoteSrv.URL,
+			StrmURL:         "http://stream.example.com",
+			APIKey:          "key",
+			RootStart:       "/media",
+			LibraryMappings: []config.LibraryMapping{{RemoteName: "Movies", LocalPath: tmpDir}},
+		}},
+	}
+
+	s := New(cfg, database)
+	if err := s.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	expectedStrm := filepath.Join(tmpDir, "Iron Man (2008)", "movie.strm")
+	if _, err := os.Stat(expectedStrm); err != nil {
+		t.Errorf("unidentified item not written at %q: %v", expectedStrm, err)
 	}
 }
