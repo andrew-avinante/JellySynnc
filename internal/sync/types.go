@@ -17,6 +17,14 @@ type candidateKey struct {
 	Resolution  string
 }
 
+// staleItem is a synced_items row that no longer matches reality on the target,
+// paired with the reason it was flagged. Produced by the verify pass for reporting
+// and removal.
+type staleItem struct {
+	Row    db.SyncedItem
+	Reason string
+}
+
 // candidate is one remote's copy of a media item, paired with the remote and the
 // library mapping it was found through.
 type candidate struct {
@@ -207,6 +215,9 @@ func (candidates candidateMap) add(item jellyfin.MediaItem, remote config.Remote
 		}
 	}
 	for k, v := range item.ProviderIDs {
+		if isCollectionKey(k) {
+			continue
+		}
 		key := candidateKey{ProviderKey: providerKey(k, v), Resolution: item.Resolution}
 		candidates[key] = append(candidates[key], candidate{Remote: remote, Item: item, LibraryMapping: mapping})
 	}
