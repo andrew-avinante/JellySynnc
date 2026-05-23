@@ -3,8 +3,11 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -80,6 +83,35 @@ func (s *Syncer) Run(ctx context.Context) (retErr error) {
 	if err := s.debug.write(s.cfg.GetDebugOutputPath(), targetIndex, multiResolution); err != nil {
 		slog.Warn("writing debug report", "err", err)
 	}
+	return nil
+}
+
+// Verify reconciles the synced_items table against reality on the target. A synced
+// row is stale when its .strm file is missing on disk OR the target server no
+// longer indexes the item by provider key. Stale rows are always logged; when apply
+// is true they are deleted from the database. The .strm files themselves are left
+// untouched: a missing one is already gone, and a present-but-unindexed one is left
+// for the next sync to re-evaluate.
+func (s *Syncer) Verify(ctx context.Context, apply bool) error {
+	targetIndex, err := s.buildTargetIndex(ctx)
+	if err != nil {
+		return fmt.Errorf("building target index: %w", err)
+	}
+
+	syncedItems, err := db.GetAllSyncedItems(s.db)
+	if err != nil {
+		return fmt.Errorf("loading synced items: %w", err)
+	}
+
+	stale := findStale(syncedItems, targetIndex)
+	logStale(stale, apply)
+
+	removed := 0
+	if apply {
+		removed = s.deleteStale(stale)
+	}
+	slog.Info("verify complete",
+		"checked", len(syncedItems), "stale", len(stale), "removed", removed, "apply", apply)
 	return nil
 }
 
@@ -160,6 +192,21 @@ func (s *Syncer) removalPass(syncedItems []db.SyncedItem, synced syncedIndex, ca
 		itemsRemoved++
 	}
 	return itemsRemoved
+}
+
+// deleteStale removes the database row for each stale item, returning how many were
+// deleted. The .strm files are intentionally not touched. Failures are logged and
+// skipped so one bad row doesn't abort the rest.
+func (s *Syncer) deleteStale(stale []staleItem) int {
+	removed := 0
+	for _, item := range stale {
+		if err := db.DeleteSyncedItem(s.db, item.Row.ID); err != nil {
+			slog.Warn("deleting synced item", "id", item.Row.ID, "err", err)
+			continue
+		}
+		removed++
+	}
+	return removed
 }
 
 // writeWinner writes the strm file for the chosen candidate and records it in the
@@ -381,4 +428,109 @@ func buildLibraryIndex(libs []jellyfin.Library) map[string]string {
 		index[strings.ToLower(lib.Name)] = lib.ID
 	}
 	return index
+}
+
+// findStale returns the synced rows that are no longer backed by reality on the
+// target, each paired with the reason it was flagged.
+func findStale(rows []db.SyncedItem, target *TargetIndex) []staleItem {
+	var stale []staleItem
+	for _, row := range rows {
+		if reason, ok := staleReason(row, target); ok {
+			stale = append(stale, staleItem{Row: row, Reason: reason})
+		}
+	}
+	return stale
+}
+
+// staleReason reports whether a synced row is stale and why. A row is stale when its
+// .strm file is missing OR a conclusive target check finds no matching provider key.
+// The target check is inconclusive (and so never flags "not on target") when the row
+// has no real provider IDs to match — only synthetic "jellyfin_*" or collection keys,
+// neither of which exist on the target. A row whose provider_ids JSON is corrupt
+// can't be checked against the target at all: it's flagged stale only if its file is
+// also missing, otherwise skipped (logged) to avoid deleting a row we can't verify.
+func staleReason(row db.SyncedItem, target *TargetIndex) (string, bool) {
+	fileMissing := strmFileMissing(row.StrmPath)
+
+	pids, ok := decodeProviderIDs(row.ProviderIDs)
+	if !ok {
+		if fileMissing {
+			return "strm file missing (provider_ids corrupt)", true
+		}
+		slog.Warn("corrupt provider_ids, skipping target check", "id", row.ID)
+		return "", false
+	}
+
+	onTarget, checkable := targetCovers(pids, row.Resolution, target)
+	notOnTarget := checkable && !onTarget
+	switch {
+	case fileMissing && notOnTarget:
+		return "strm file missing and not on target", true
+	case fileMissing:
+		return "strm file missing", true
+	case notOnTarget:
+		return "not on target", true
+	default:
+		return "", false
+	}
+}
+
+// logStale logs each stale row with its reason. dry_run is true when no deletion
+// will follow, so the output makes clear whether rows are being removed or only
+// reported.
+func logStale(stale []staleItem, apply bool) {
+	for _, item := range stale {
+		slog.Info("stale synced item",
+			"reason", item.Reason,
+			"remote_id", item.Row.RemoteID,
+			"resolution", item.Row.Resolution,
+			"strm_path", item.Row.StrmPath,
+			"id", item.Row.ID,
+			"dry_run", !apply)
+	}
+}
+
+// targetCovers reports whether any of the row's provider keys (at its resolution, or
+// at any resolution) is present on the target. checkable is false when the row has no
+// real provider IDs to test — only synthetic or collection keys are skipped — so the
+// caller can distinguish "confirmed absent" from "couldn't check".
+func targetCovers(pids map[string]string, resolution string, target *TargetIndex) (covered, checkable bool) {
+	for k, v := range pids {
+		if isCollectionKey(k) || isSyntheticKey(k) {
+			continue
+		}
+		checkable = true
+		pk := providerKey(k, v)
+		if target.Has(candidateKey{ProviderKey: pk, Resolution: resolution}) || target.HasProviderKey(pk) {
+			return true, true
+		}
+	}
+	return false, checkable
+}
+
+// isSyntheticKey reports whether a provider-ID key is a synthetic "jellyfin_<remoteID>"
+// identifier injected for items with no real provider IDs (sync_unknown_provider_ids).
+// Such keys exist only in this DB, never on the target, so they can't confirm presence.
+func isSyntheticKey(k string) bool {
+	return strings.HasPrefix(k, "jellyfin_")
+}
+
+// strmFileMissing reports whether the file at path does not exist. A stat error other
+// than "not found" (e.g. a permission error) returns false so an inconclusive check
+// never flags the row for deletion.
+func strmFileMissing(path string) bool {
+	if _, err := os.Stat(path); err != nil {
+		return errors.Is(err, fs.ErrNotExist)
+	}
+	return false
+}
+
+// decodeProviderIDs unmarshals the JSON provider-ID map stored on a synced row.
+// ok is false when the JSON is corrupt.
+func decodeProviderIDs(raw string) (map[string]string, bool) {
+	var pids map[string]string
+	if err := json.Unmarshal([]byte(raw), &pids); err != nil {
+		return nil, false
+	}
+	return pids, true
 }
