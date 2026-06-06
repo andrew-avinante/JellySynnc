@@ -343,6 +343,61 @@ func TestCoverWhy_CrossPIDMultiResAlternateNotCovered(t *testing.T) {
 	}
 }
 
+// TestCoverWhy_CrossEntityTVDBIDNotCovered is the regression for the type-scoped
+// provider key: TVDB numbers movies, series and episodes in separate id spaces, so a
+// movie can share a numeric TVDB id with an unrelated episode. Here the movie "John
+// Mulaney: The Comeback Kid" (tvdb movie id 13604) must NOT be treated as covered by
+// the absent target just because an unrelated episode ("Homecoming", I Love Lucy)
+// carries tvdb episode id 13604.
+func TestCoverWhy_CrossEntityTVDBIDNotCovered(t *testing.T) {
+	target := NewTargetIndex()
+	target.Add(jellyfin.MediaItem{
+		Name: "Homecoming", Type: "Episode", Resolution: "1080p",
+		ProviderIDs:       map[string]string{"imdb": "tt0609364", "tvdb": "13604"},
+		SeriesProviderIDs: map[string]string{"tvdb": "76172"},
+		SeasonNumber:      6, EpisodeNumber: 12,
+	})
+
+	comebackKid := jellyfin.MediaItem{
+		Name: "John Mulaney: The Comeback Kid", Type: "Movie", Resolution: "1080p",
+		ProviderIDs: map[string]string{
+			"imdb": "tt5069564", "tmdb": "367735", "tvdb": "13604",
+			"tvdbslug": "john-mulaney-the-comeback-kid",
+		},
+	}
+	candidates := newCandidateMap()
+	candidates.add(comebackKid, config.RemoteConfig{ID: "remote1"}, config.LibraryMapping{})
+	multiRes := newMultiResolutionSet(candidates, target)
+
+	for key := range candidates {
+		covered, reason := target.coverWhy(key, comebackKid, multiRes)
+		if covered {
+			t.Errorf("key %q wrongly covered (reason %q); the movie shares tvdb:13604 only with an unrelated episode", key.ProviderKey, reason)
+		}
+	}
+}
+
+// TestCoverWhy_SameEntityTVDBIDStillCovers confirms type scoping does not break a
+// legitimate match: a movie sharing a TVDB id with a target *movie* is still covered.
+func TestCoverWhy_SameEntityTVDBIDStillCovers(t *testing.T) {
+	target := NewTargetIndex()
+	target.Add(jellyfin.MediaItem{
+		Name: "Some Movie", Type: "Movie", Resolution: "1080p",
+		ProviderIDs: map[string]string{"tvdb": "13604"},
+	})
+
+	candidate := jellyfin.MediaItem{
+		Name: "Some Movie", Type: "Movie", Resolution: "1080p",
+		ProviderIDs: map[string]string{"tvdb": "13604"},
+	}
+	multiRes := newMultiResolutionSet(newCandidateMap(), target)
+	covered, reason := target.coverWhy(
+		candidateKey{ProviderKey: "tvdb:13604", Resolution: "1080p"}, candidate, multiRes)
+	if !covered {
+		t.Errorf("same-type tvdb match should cover, got not covered (reason %q)", reason)
+	}
+}
+
 // TestCoverWhy_AllBranches exercises every match branch of coverWhy with a focused
 // target setup per case, including the two "not covered" scenarios surfaced during
 // debugging: an unidentified target item (empty provider IDs + mangled name) and a
@@ -912,6 +967,57 @@ func TestRun_Idempotent(t *testing.T) {
 	}
 }
 
+// TestRun_DedupsMultiProviderItem is the regression for the duplicate-rows bug: an
+// item carries several provider IDs (imdb + tmdb + tvdb), so it appears under one
+// candidateKey per ID. Each must resolve to the same strm file and yield exactly one
+// DB row, not one per provider ID.
+func TestRun_DedupsMultiProviderItem(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	targetSrv := newJellyfinServer(t, nil, nil)
+	remoteSrv := newJellyfinServer(t,
+		[]jfVirtualFolder{{ItemId: "lib1", Name: "Movies", CollectionType: "movies"}},
+		map[string][]jfItem{
+			"lib1": {{
+				Id:          "item1",
+				Name:        "Multi ID Movie",
+				Type:        "Movie",
+				ProviderIds: map[string]string{"Tmdb": "12345", "Imdb": "tt0000001", "Tvdb": "999"},
+				MediaSources: []jfMediaSource{{
+					Path:         "/media/Movies/Multi ID Movie (2020)/movie.mkv",
+					MediaStreams: []jfMediaStream{{Type: "Video", Height: 1080, Codec: "hevc"}},
+				}},
+			}},
+		},
+	)
+
+	database := setupTestDB(t)
+	cfg := &config.Config{
+		Target: config.TargetConfig{URL: targetSrv.URL, APIKey: "key"},
+		Remotes: []config.RemoteConfig{{
+			ID:              "remote1",
+			APIURL:          remoteSrv.URL,
+			StrmURL:         "http://stream.example.com",
+			APIKey:          "key",
+			RootStart:       "/media",
+			LibraryMappings: []config.LibraryMapping{{RemoteName: "Movies", LocalPath: tmpDir}},
+		}},
+	}
+
+	s := New(cfg, database)
+	if err := s.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	items, err := dbpkg.GetAllSyncedItems(database)
+	if err != nil {
+		t.Fatalf("GetAllSyncedItems: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 synced item for a 3-provider-ID movie, got %d", len(items))
+	}
+}
+
 // TestRun_WritesCollectionSibling is the end-to-end regression for the collection-ID
 // over-coverage bug. The target has Iron Man 3; the remote has a different movie
 // (Iron Man) that shares only the franchise collection ID. The sibling must still be
@@ -1036,5 +1142,84 @@ func TestRun_WritesUnidentifiedTargetItem(t *testing.T) {
 	expectedStrm := filepath.Join(tmpDir, "Iron Man (2008)", "movie.strm")
 	if _, err := os.Stat(expectedStrm); err != nil {
 		t.Errorf("unidentified item not written at %q: %v", expectedStrm, err)
+	}
+}
+
+// TestRun_WritesMovieDespiteCrossEntityTVDBCollision is the end-to-end regression
+// for the type-scoped provider key. TVDB numbers movies and episodes in separate id
+// spaces, so the movie "John Mulaney: The Comeback Kid" (tvdb movie id 13604) shares
+// a numeric TVDB id with an unrelated target episode ("Homecoming", I Love Lucy, tvdb
+// episode id 13604). Before type scoping the movie was treated as already on target
+// and silently skipped every run; it must now be written.
+func TestRun_WritesMovieDespiteCrossEntityTVDBCollision(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Target has only an unrelated episode that happens to carry tvdb:13604, at the
+	// same resolution as the movie so the exact (providerKey, resolution) match would
+	// fire under the old, type-agnostic scheme.
+	targetSrv := newJellyfinServer(t,
+		[]jfVirtualFolder{{ItemId: "tlib-shows", Name: "Shows", CollectionType: "tvshows"}},
+		map[string][]jfItem{
+			"tlib-shows": {{
+				Id:          "target-ep1",
+				Name:        "Homecoming",
+				Type:        "Episode",
+				ProviderIds: map[string]string{"Imdb": "tt0609364", "Tvdb": "13604"},
+				MediaSources: []jfMediaSource{{
+					Path:         "/target/Shows/I Love Lucy/Season 06/s06e12.strm",
+					MediaStreams: []jfMediaStream{{Type: "Video", Height: 1080, Codec: "hevc"}},
+				}},
+			}},
+		},
+	)
+
+	remoteSrv := newJellyfinServer(t,
+		[]jfVirtualFolder{{ItemId: "rlib-movies", Name: "Movies", CollectionType: "movies"}},
+		map[string][]jfItem{
+			"rlib-movies": {{
+				Id:   "remote-mulaney",
+				Name: "John Mulaney: The Comeback Kid",
+				Type: "Movie",
+				ProviderIds: map[string]string{
+					"Imdb": "tt5069564", "Tmdb": "367735", "Tvdb": "13604",
+					"TvdbSlug": "john-mulaney-the-comeback-kid",
+				},
+				MediaSources: []jfMediaSource{{
+					Path:         "/media/movies/John Mulaney - The Comeback Kid (2015)/movie.mkv",
+					MediaStreams: []jfMediaStream{{Type: "Video", Height: 1080, Codec: "hevc"}},
+				}},
+			}},
+		},
+	)
+
+	database := setupTestDB(t)
+	cfg := &config.Config{
+		Target: config.TargetConfig{URL: targetSrv.URL, APIKey: "key"},
+		Remotes: []config.RemoteConfig{{
+			ID:              "remote1",
+			APIURL:          remoteSrv.URL,
+			StrmURL:         "http://stream.example.com",
+			APIKey:          "key",
+			RootStart:       "/media",
+			LibraryMappings: []config.LibraryMapping{{RemoteName: "Movies", LocalPath: tmpDir}},
+		}},
+	}
+
+	s := New(cfg, database)
+	if err := s.Run(context.Background()); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	expectedStrm := filepath.Join(tmpDir, "John Mulaney - The Comeback Kid (2015)", "movie.strm")
+	if _, err := os.Stat(expectedStrm); err != nil {
+		t.Errorf("movie not written at %q (wrongly skipped via cross-entity tvdb:13604 collision): %v", expectedStrm, err)
+	}
+
+	items, err := dbpkg.GetAllSyncedItems(database)
+	if err != nil {
+		t.Fatalf("GetAllSyncedItems: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 synced item, got %d", len(items))
 	}
 }
